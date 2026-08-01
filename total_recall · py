@@ -1,0 +1,40 @@
+"""
+Total Recall : détection déterministe (par expression régulière, sans LLM) de l'intention
+de mémorisation instantanée, déclenchée par des formules comme :
+  - "Rappelle-toi que ..."
+  - "Souviens-toi que ..."
+  - "Note que ..."
+
+Le but est la vitesse et la fiabilité : quand l'utilisateur emploie explicitement l'une de
+ces formules, il n'y a aucune ambiguïté sur l'intention, donc pas besoin d'attendre un
+aller-retour LLM (ni de dépenser du quota gratuit) pour décider s'il faut appeler l'outil
+`remember_note`. Le LLM garde toutefois la possibilité d'appeler cet outil lui-même via le
+function calling normal si l'utilisateur formule la demande autrement.
+"""
+
+import re
+from typing import Optional
+
+# Autorise "rappelle-toi", "rappelle toi", "rappelletoi", "souviens-toi", "note"/"notes",
+# suivi de "que" puis du contenu à mémoriser.
+TRIGGER_PATTERN = re.compile(
+    r"^\s*(?:rappelle[\s-]?toi|souviens[\s-]?toi|notes?)\s+que\s+(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def extract_memory_content(prompt: str) -> Optional[str]:
+    """
+    Renvoie le contenu à mémoriser si `prompt` correspond à un déclencheur Total Recall,
+    sinon None. Le prompt entier n'a pas besoin d'être uniquement la formule : seul le début
+    de la phrase est vérifié (le contenu peut continuer sur plusieurs phrases).
+    """
+    if not prompt:
+        return None
+
+    match = TRIGGER_PATTERN.match(prompt.strip())
+    if not match:
+        return None
+
+    content = match.group(1).strip().rstrip(".!? ").strip()
+    return content or None

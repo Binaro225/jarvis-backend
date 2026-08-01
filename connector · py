@@ -1,0 +1,88 @@
+"""
+Connector - Fonctions Python (tools) qui appellent le Web App Google Apps Script
+(Drive / Gmail / Docs / Sheets) déployé séparément.
+
+Chaque fonction est une "tool function" utilisable par le LLM via function calling.
+"""
+
+import os
+import json
+import httpx
+from typing import Any, Dict, Optional
+
+GAS_WEBAPP_URL = os.getenv("GAS_WEBAPP_URL")
+GAS_API_SECRET = os.getenv("GAS_API_SECRET")  # optionnel, doit correspondre à API_SECRET côté Apps Script
+
+GAS_TIMEOUT = 30  # secondes
+
+
+class ConnectorError(Exception):
+    """Erreur levée quand l'appel au connecteur Apps Script échoue."""
+
+
+async def call_gas(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Envoie une requête POST au Web App Apps Script et renvoie le champ 'data' de la réponse."""
+    if not GAS_WEBAPP_URL:
+        raise ConnectorError(
+            "GAS_WEBAPP_URL n'est pas configurée. Définis cette variable d'environnement "
+            "avec l'URL /exec de ton déploiement Apps Script."
+        )
+
+    payload = {"action": action, "params": params or {}}
+    if GAS_API_SECRET:
+        payload["token"] = GAS_API_SECRET
+
+    try:
+        async with httpx.AsyncClient(timeout=GAS_TIMEOUT) as client:
+            r = await client.post(GAS_WEBAPP_URL, json=payload)
+    except httpx.RequestError as e:
+        raise ConnectorError(f"Impossible de contacter le connecteur Apps Script: {e}")
+
+    if r.status_code != 200:
+        raise ConnectorError(f"Le connecteur Apps Script a renvoyé une erreur HTTP {r.status_code}: {r.text}")
+
+    try:
+        body = r.json()
+    except json.JSONDecodeError:
+        raise ConnectorError(f"Réponse non-JSON du connecteur Apps Script: {r.text[:300]}")
+
+    if not body.get("success"):
+        raise ConnectorError(body.get("error", "Erreur inconnue du connecteur Apps Script."))
+
+    return body.get("data")
+
+
+# ----------------------------------------------------------------------------
+# Fonctions "tool" exposées au LLM
+# ----------------------------------------------------------------------------
+
+async def search_google_drive(query: str) -> Dict[str, Any]:
+    """Recherche des fichiers/dossiers dans Google Drive et renvoie noms, ID et extraits."""
+    results = await call_gas("search_drive", {"query": query})
+    return {"results": results}
+
+
+async def get_unread_emails() -> Dict[str, Any]:
+    """Récupère un résumé des derniers e-mails non lus sur Gmail."""
+    results = await call_gas("read_email", {"maxResults": 5})
+    return {"emails": results}
+
+
+async def send_gmail(to: str, subject: str, body: str) -> Dict[str, Any]:
+    """Envoie un e-mail via Gmail."""
+    result = await call_gas("send_email", {"to": to, "subject": subject, "body": body})
+    return result
+
+
+async def save_note_to_drive(title: str, content: str) -> Dict[str, Any]:
+    """Crée une note (Google Doc) dans le dossier Drive dédié."""
+    result = await call_gas("create_note", {"type": "doc", "title": title, "content": content})
+    return result
+
+
+async def remember_note(content: str) -> Dict[str, Any]:
+    """Ajoute une information à la mémoire persistante (Mémoire_Jarvis.txt) sur Drive.
+    Contrairement à save_note_to_drive, n'ouvre pas un nouveau document à chaque appel :
+    la ligne est ajoutée, horodatée, à la suite d'un unique fichier cumulatif."""
+    result = await call_gas("remember", {"content": content})
+    return result
