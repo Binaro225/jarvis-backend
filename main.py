@@ -225,8 +225,17 @@ async def run_openai_style_chat(
         if not tool_calls:
             return message.get("content") or "", tools_used
 
-        messages.append(message)
+        # Filet de securite : certains fournisseurs (Mistral en particulier) rejettent avec
+        # "Invalid JSON payload" un message assistant renvoye avec un 'content' absent/None ou
+        # des cles superflues. On ne renvoie que les champs strictement necessaires.
+        safe_message: Dict[str, Any] = {
+            "role": message.get("role", "assistant"),
+            "content": message.get("content") or "",
+            "tool_calls": tool_calls,
+        }
+        messages.append(safe_message)
 
+        consecutive_errors = 0
         for tc in tool_calls:
             fn_name = tc["function"]["name"]
             raw_args = tc["function"].get("arguments") or "{}"
@@ -237,6 +246,7 @@ async def run_openai_style_chat(
 
             result = await tools.execute_tool(fn_name, fn_args)
             tools_used.append(ToolCallLog(name=fn_name, arguments=fn_args, result=result))
+            consecutive_errors = consecutive_errors + 1 if isinstance(result, dict) and result.get("error") else 0
 
             messages.append(
                 {
@@ -246,6 +256,18 @@ async def run_openai_style_chat(
                     "content": json.dumps(result, ensure_ascii=False),
                 }
             )
+
+        if consecutive_errors >= 2:
+            # Inutile d'epuiser les iterations si l'outil echoue systematiquement (ex: action
+            # non implementee cote Apps Script) : on laisse le LLM formuler une reponse tout de
+            # suite plutot que de boucler pour rien.
+            data = await call_openai_compatible_raw(
+                base_url, api_key, model, messages, None, temperature, max_tokens, extra_headers
+            )
+            try:
+                return data["choices"][0]["message"].get("content") or "", tools_used
+            except (KeyError, IndexError):
+                break
 
     fallback_text = last_message.get("content") or "(Reponse tronquee apres plusieurs appels d'outils.)"
     return fallback_text, tools_used
@@ -301,6 +323,7 @@ async def run_gemini_chat(
     tools_used: List[ToolCallLog] = []
 
     last_parts: List[Dict[str, Any]] = []
+    consecutive_errors = 0
     for _ in range(MAX_TOOL_ITERATIONS):
         data = await call_gemini_raw(model, api_key, contents, system, llm_tools, temperature, max_tokens)
         try:
@@ -324,10 +347,21 @@ async def run_gemini_chat(
 
         result = await tools.execute_tool(fn_name, fn_args)
         tools_used.append(ToolCallLog(name=fn_name, arguments=fn_args, result=result))
+        consecutive_errors = consecutive_errors + 1 if isinstance(result, dict) and result.get("error") else 0
 
         contents.append(
             {"role": "function", "parts": [{"functionResponse": {"name": fn_name, "response": {"result": result}}}]}
         )
+
+        if consecutive_errors >= 2:
+            # L'outil echoue systematiquement (ex: action non implementee cote Apps Script) :
+            # on demande une derniere reponse sans outils plutot que d'epuiser les iterations.
+            data = await call_gemini_raw(model, api_key, contents, system, None, temperature, max_tokens)
+            try:
+                text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
+                return text, tools_used
+            except (KeyError, IndexError):
+                break
 
     fallback_text = "".join(p.get("text", "") for p in last_parts) or "(Reponse tronquee apres plusieurs appels d'outils.)"
     return fallback_text, tools_used
