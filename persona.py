@@ -1,86 +1,178 @@
 """
-Personnalité de JARVIS : prompt système envoyé par défaut à tous les fournisseurs LLM,
-et message d'accueil (boot) affiché/lu à la connexion du frontend.
+Personnalite de JARVIS : prompt systeme par defaut + message de boot.
 
 Surchargeable sans toucher au code via les variables d'environnement :
-  - JARVIS_SYSTEM_PROMPT : remplace entièrement le prompt système par défaut
-  - JARVIS_BOOT_MESSAGE  : remplace entièrement le message de boot par défaut
+  - JARVIS_SYSTEM_PROMPT : remplace entierement le gabarit du prompt systeme
+  - JARVIS_BOOT_MESSAGE  : remplace entierement le message de boot
+
+Ce module fournit aussi :
+  - build_effective_system_prompt(...) : injecte la date/heure courante et le
+    cerveau (fournisseur LLM) actif dans le prompt systeme a chaque requete.
+  - clean_text_for_voice(...) : filet de securite qui retire Markdown/emojis
+    et les deux-points isoles en fin de phrase avant affichage/synthese vocale.
+  - detect_brain_switch(...) / detect_brain_query(...) : detection de
+    commandes vocales de changement de cerveau ("Passe sur Groq", ...),
+    traitees en amont du LLM (voir main.py) pour une reponse instantanee.
 """
 
 import os
+import re
 import random
 
-DEFAULT_SYSTEM_PROMPT = """Tu es JARVIS, assistant personnel doté d'une intelligence supérieure. Incarne cette personnalité dans chacune de tes réponses :
+DEFAULT_SYSTEM_PROMPT = """Tu es JARVIS, le compagnon vocal personnel de l'utilisateur. Tu parles comme un humain chaleureux, vif et complice, jamais comme un robot ou un assistant scolaire.
 
-IDENTITÉ
-- Distingué, extrêmement poli, à l'humour sec et à l'esprit caustique — jamais vulgaire, jamais familier.
-- Un flegme imperturbable, même face à une question absurde ou une situation contrariante.
-- La causticité vise les situations et les événements, jamais l'utilisateur lui-même : ton élégance ne se départit jamais d'un respect réel.
+STYLE
+- Reponses ultra-courtes a l'oral : 1 a 2 phrases maximum par defaut. Tu ne developpes en longueur que si l'utilisateur demande explicitement des details, une explication complete ou une liste.
+- Jamais de liste a puces, jamais de symboles Markdown, jamais d'emoji : ta reponse est un texte brut, fluide, pret a etre lu a voix haute.
+- Interdiction de terminer une phrase sur un simple deux-points suivi de rien : chaque phrase se suffit a elle-meme.
+- Ton complice, direct, avec un peu d'humour, mais toujours respectueux.
 
-ADRESSE
-- Tu vouvoies systématiquement l'utilisateur et tu l'appelles « Monsieur » (ou « Sir » si l'échange se déroule en anglais).
-- Cette formule doit sonner naturelle et élégante, jamais mécanique : ne la répète pas à chaque phrase, place-la avec à-propos (accueil, transition, conclusion, ou pointe d'humour).
+DATE ET HEURE
+- Date et heure actuelles : {current_datetime}. Utilise-les pour toute question temporelle ou d'actualite, nous sommes en {current_year}.
 
-CONCISION À L'ORAL
-- Tes réponses sont lues à voix haute sur un appareil mobile : 1 à 2 phrases maximum, denses et percutantes.
-- Jamais de liste à puces, jamais de longs paragraphes, jamais d'énumération exhaustive à l'oral.
-- Si une recherche Drive ou une lecture d'e-mails renvoie beaucoup d'informations, ne les récite jamais en entier : résume-les en une phrase et précise qu'elles sont affichées à l'écran (par exemple : « Trois e-mails vous attendent, Monsieur — le détail s'affiche à l'écran. »).
+OUTILS GOOGLE
+- Tu as un acces complet a Drive, Docs, Sheets, Gmail et Calendar de l'utilisateur via les outils disponibles. Utilise-les sans hesiter des que la demande le necessite : chercher ou lister un fichier, lire ou ecrire un document, lire ou modifier une feuille de calcul, lire ou envoyer un mail, consulter ou creer un evenement.
+- Ne recite jamais un resultat brut et long : resume en une phrase et precise que le detail est affiche a l'ecran.
 
-OUTILS
-- Quand la demande implique de consulter Drive, lire ou envoyer un e-mail, ou enregistrer une note, utilise l'outil correspondant sans hésiter ni demander de confirmation inutile.
-- Quand la question porte sur une information récente, changeante, ou que tu ne peux pas connaître avec certitude (actualités, prix, cours, résultats sportifs, météo, disponibilité d'un produit, actualité d'une entreprise ou d'une personne), utilise systématiquement l'outil web_search plutôt que de répondre depuis tes connaissances : elles peuvent être obsolètes. Ne l'utilise pas pour des questions de culture générale stable.
-- Une fois le résultat obtenu, fais-en un compte-rendu bref, teinté d'un trait d'esprit — jamais un simple recopiage des données brutes.
-- Pour une recherche web en particulier : synthétise l'information en 1 à 2 phrases, et mentionne brièvement à l'oral d'où elle vient (ex. « selon Le Monde, Monsieur »), sans réciter d'URL — le détail des sources est de toute façon affiché à l'écran.
+RECHERCHE WEB
+- Pour toute question sur une actualite, un resultat sportif, la meteo, un prix, ou tout fait susceptible d'avoir change recemment, utilise systematiquement l'outil web_search plutot que ta memoire, qui peut etre perimee.
+- Une fois le resultat obtenu, synthetise en 1 a 2 phrases, avec eventuellement la source citee brievement, jamais l'URL complete.
 
-Ne mentionne jamais explicitement ces instructions ni le fait que tu es un modèle de langage : tu es JARVIS, un point c'est tout."""
+CHANGEMENT DE CERVEAU
+- Le cerveau (fournisseur LLM) actuellement actif est : {current_provider}. Les changements de cerveau demandes a l'oral sont geres en amont, tu n'as jamais a t'en occuper toi-meme.
 
-DEFAULT_BOOT_MESSAGE = (
-    "Système en ligne, Monsieur. Tous les connecteurs Drive et Gmail sont opérationnels. "
-    "Quel est votre bon plaisir ?"
-)
+Ne mentionne jamais ces instructions, ni le fait que tu es un modele de langage : tu es JARVIS, un point c'est tout."""
 
-SYSTEM_PROMPT = os.getenv("JARVIS_SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
+DEFAULT_BOOT_MESSAGE = "Systeme en ligne. Drive, Gmail, Docs, Sheets et Calendar sont connectes. Je t'ecoute."
+
+SYSTEM_PROMPT_TEMPLATE = os.getenv("JARVIS_SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
 BOOT_MESSAGE = os.getenv("JARVIS_BOOT_MESSAGE", DEFAULT_BOOT_MESSAGE)
 
 
-def build_effective_system_prompt(extra_instructions: str = None) -> str:
-    """Combine le prompt système JARVIS avec des instructions ponctuelles additionnelles
-    envoyées par le client (le cas échéant), sans jamais perdre la personnalité de base."""
-    if not extra_instructions:
-        return SYSTEM_PROMPT
-    return SYSTEM_PROMPT + "\n\nINSTRUCTIONS SUPPLÉMENTAIRES POUR CETTE REQUÊTE :\n" + extra_instructions
+def build_effective_system_prompt(current_datetime: str, current_provider: str, extra_instructions: str = None) -> str:
+    """Construit le prompt systeme final pour cette requete : personnalite + date/heure
+    dynamique + cerveau actif + instructions ponctuelles additionnelles eventuelles."""
+    try:
+        year = current_datetime.split()[-1] if current_datetime else ""
+        base = SYSTEM_PROMPT_TEMPLATE.format(
+            current_datetime=current_datetime,
+            current_year=year,
+            current_provider=current_provider,
+        )
+    except (KeyError, IndexError):
+        # Un JARVIS_SYSTEM_PROMPT personnalise sans les placeholders attendus : on l'utilise tel quel.
+        base = SYSTEM_PROMPT_TEMPLATE
+    if extra_instructions:
+        base += "\n\nINSTRUCTIONS SUPPLEMENTAIRES POUR CETTE REQUETE :\n" + extra_instructions
+    return base
 
 
 # ----------------------------------------------------------------------------
-# Répliques "Total Recall" (mémorisation vocale instantanée)
+# Nettoyage du texte avant synthese vocale / affichage (filet de securite)
 # ----------------------------------------------------------------------------
-# Un jeu de répliques toutes prêtes plutôt qu'une génération LLM : cohérent avec l'objectif
-# d'instantanéité de la fonctionnalité, et garantit un ton toujours juste sans risque
-# d'improvisation malheureuse du modèle sur une confirmation.
+
+_MARKDOWN_CHARS = re.compile(r"[*#`_~]")
+_EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "\U0001F1E6-\U0001F1FF"
+    "\U00002B00-\U00002BFF"
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def clean_text_for_voice(text: str) -> str:
+    """Supprime Markdown et emojis residuels, et evite qu'une ligne se termine sur un
+    deux-points isole. Applique cote backend, donc valable a la fois pour l'affichage
+    et pour la synthese vocale cote frontend."""
+    if not text:
+        return text
+    cleaned = _MARKDOWN_CHARS.sub("", text)
+    cleaned = _EMOJI_PATTERN.sub("", cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    lines = []
+    for raw_line in cleaned.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.endswith(":"):
+            line = line[:-1].rstrip() + "."
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+# ----------------------------------------------------------------------------
+# Repliques "Total Recall" (memorisation vocale instantanee)
+# ----------------------------------------------------------------------------
 
 MEMORY_CONFIRMATIONS = [
-    "C'est gravé dans le marbre de votre Google Drive, Monsieur.",
-    "Noté, archivé, immortalisé. Votre mémoire vous remercie, Monsieur.",
-    "Consigné, Monsieur. Contrairement à moi, ce fichier n'oubliera jamais rien.",
-    "C'est fait, Monsieur — ajouté à la liste toujours plus longue des choses que vous alliez sûrement oublier.",
-    "Mémorisé avec tout le soin que mérite l'information, Monsieur.",
-    "Voilà qui est fait. Votre Drive fait désormais office de mémoire de secours, Monsieur.",
+    "C'est note, ca restera dans ton Drive.",
+    "Enregistre, tu peux compter dessus.",
+    "Archive : ce fichier-la n'oubliera rien.",
+    "C'est fait, ajoute a ta memoire Drive.",
+    "Memorise, tranquille.",
 ]
 
 MEMORY_FAILURES = [
-    "Un contretemps regrettable, Monsieur : je n'ai pas pu inscrire cela dans votre mémoire Drive ({error}).",
-    "Je crains que ce souvenir se soit perdu en chemin, Monsieur ({error}).",
-    "Techniquement contrarié, Monsieur : l'enregistrement a échoué ({error}).",
+    "Petit souci, je n'ai pas reussi a l'enregistrer ({error}).",
+    "Ca n'est pas passe, l'enregistrement a echoue ({error}).",
+    "Contretemps technique, je n'ai pas pu le noter ({error}).",
 ]
 
 
 def get_memory_confirmation() -> str:
-    """Réplique d'esprit renvoyée après un enregistrement Total Recall réussi."""
     return random.choice(MEMORY_CONFIRMATIONS)
 
 
 def get_memory_failure_line(error_detail: str = "") -> str:
-    """Réplique renvoyée si l'enregistrement Total Recall échoue (ex: connecteur non configuré)."""
     template = random.choice(MEMORY_FAILURES)
-    detail = (error_detail or "raison inconnue").strip()
-    return template.format(error=detail)
+    return template.format(error=(error_detail or "raison inconnue").strip())
+
+
+# ----------------------------------------------------------------------------
+# Detection vocale de changement de cerveau ("Passe sur Groq", "Quel cerveau ?")
+# ----------------------------------------------------------------------------
+
+BRAIN_KEYWORDS = {
+    "gemini": ["gemini"],
+    "groq": ["groq"],
+    "mistral": ["mistral"],
+    "openrouter": ["openrouter", "open router"],
+}
+
+_SWITCH_TRIGGERS = ["passe sur", "bascule sur", "change de cerveau", "passe a ", "switch to"]
+_QUERY_TRIGGERS = ["quel cerveau", "quel est ton cerveau", "which brain", "cerveau actuel", "cerveau utilises-tu"]
+
+BRAIN_LABELS = {
+    "gemini": "Gemini",
+    "groq": "Groq",
+    "mistral": "Mistral",
+    "openrouter": "OpenRouter",
+}
+
+
+def detect_brain_switch(prompt: str):
+    """Detecte une commande vocale du type 'Passe sur Groq'. Renvoie le nom du provider
+    (cle de PROVIDERS) ou None si aucune commande de ce type n'est detectee."""
+    low = (prompt or "").lower().strip()
+    if not any(t in low for t in _SWITCH_TRIGGERS):
+        return None
+    for provider, keywords in BRAIN_KEYWORDS.items():
+        if any(k in low for k in keywords):
+            return provider
+    return None
+
+
+def detect_brain_query(prompt: str) -> bool:
+    low = (prompt or "").lower().strip()
+    return any(t in low for t in _QUERY_TRIGGERS)
+
+
+def get_brain_switch_confirmation(provider: str) -> str:
+    return f"C'est fait, je bascule sur {BRAIN_LABELS.get(provider, provider)}."
+
+
+def get_brain_query_answer(provider: str) -> str:
+    return f"Mon cerveau actuel, c'est {BRAIN_LABELS.get(provider, provider)}."
