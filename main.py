@@ -1,16 +1,21 @@
 """
-Backend Python léger - FastAPI multi-fournisseurs LLM (gratuit) + Function Calling
-Fournisseurs supportés : Gemini, Groq, Mistral, OpenRouter
-Outils (tools) : connecteur Google Apps Script (Drive / Gmail / Docs)
-Déploiement : Render (voir Procfile)
+Backend Python leger - FastAPI multi-fournisseurs LLM (gratuit) + Function Calling
+Fournisseurs supportes : Gemini, Groq, Mistral, OpenRouter
+Outils (tools) : connecteur Google Apps Script (Drive / Docs / Sheets / Gmail / Calendar)
+Recherche web : Tavily (temps reel)
+Deploiement : Render (voir Procfile) - sert aussi le frontend (index.html) directement.
 """
 
 import os
 import json
 import httpx
+from datetime import datetime
+from pathlib import Path
 from typing import Optional, Dict, Any, List
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 import tools
@@ -18,14 +23,14 @@ import persona
 import total_recall
 
 # ----------------------------------------------------------------------------
-# Configuration des fournisseurs (clés API lues via variables d'environnement)
+# Configuration des fournisseurs (cles API lues via variables d'environnement)
 # ----------------------------------------------------------------------------
 
 PROVIDERS: Dict[str, Dict[str, Any]] = {
     "gemini": {
         "key_env": "GEMINI_API_KEY",
-        "models": ["gemini-1.5-flash", "gemini-1.5-pro"],
-        "default_model": "gemini-1.5-flash",
+        "models": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"],
+        "default_model": "gemini-2.5-flash",
         "family": "gemini",
     },
     "groq": {
@@ -60,8 +65,9 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
 }
 
 MAX_TOOL_ITERATIONS = 5  # garde-fou contre les boucles d'appels d'outils infinies
+BASE_DIR = Path(__file__).resolve().parent
 
-# État global : le "cerveau" actuellement actif
+# Etat global : le "cerveau" actuellement actif
 current_brain: Dict[str, str] = {
     "provider": os.getenv("DEFAULT_PROVIDER", "gemini"),
     "model": os.getenv(
@@ -75,12 +81,13 @@ current_brain: Dict[str, str] = {
 # ----------------------------------------------------------------------------
 
 app = FastAPI(
-    title="Multi-LLM Backend avec Function Calling",
+    title="JARVIS Backend - Multi-LLM avec Function Calling",
     description=(
-        "Backend léger FastAPI - Multi-fournisseurs LLM gratuits (Gemini, Groq, Mistral, "
-        "OpenRouter) avec function calling vers Google Drive / Gmail via Apps Script."
+        "Backend leger FastAPI - Multi-fournisseurs LLM gratuits (Gemini, Groq, Mistral, "
+        "OpenRouter) avec function calling vers l'ecosysteme Google (Drive/Docs/Sheets/"
+        "Gmail/Calendar) et recherche web temps reel (Tavily)."
     ),
-    version="2.0.0",
+    version="3.0.0",
 )
 
 app.add_middleware(
@@ -93,17 +100,23 @@ app.add_middleware(
 
 
 # ----------------------------------------------------------------------------
-# Schémas Pydantic
+# Schemas Pydantic
 # ----------------------------------------------------------------------------
+
+class HistoryMessage(BaseModel):
+    role: str  # "user" ou "assistant"
+    content: str
+
 
 class ChatRequest(BaseModel):
     prompt: str
-    provider: Optional[str] = None   # override ponctuel, sans changer l'état global
-    model: Optional[str] = None      # override ponctuel du modèle
-    system: Optional[str] = None     # instructions ponctuelles additionnelles (s'ajoutent à la personnalité JARVIS, ne la remplacent pas)
+    provider: Optional[str] = None   # override ponctuel, sans changer l'etat global
+    model: Optional[str] = None      # override ponctuel du modele
+    system: Optional[str] = None     # instructions ponctuelles additionnelles
+    history: Optional[List[HistoryMessage]] = None  # historique de conversation (frontend -> backend)
     temperature: Optional[float] = 0.7
     max_tokens: Optional[int] = 1024
-    use_tools: Optional[bool] = True  # active/désactive le function calling pour cette requête
+    use_tools: Optional[bool] = True
 
 
 class ToolCallLog(BaseModel):
@@ -147,7 +160,7 @@ async def call_openai_compatible_raw(
     max_tokens: int,
     extra_headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
-    """Appelle l'endpoint /chat/completions et renvoie la réponse JSON brute (pas seulement le texte)."""
+    """Appelle l'endpoint /chat/completions et renvoie la reponse JSON brute."""
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if extra_headers:
         headers.update(extra_headers)
@@ -162,7 +175,7 @@ async def call_openai_compatible_raw(
         payload["tools"] = llm_tools
         payload["tool_choice"] = "auto"
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
         r = await client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
     if r.status_code != 200:
         raise HTTPException(status_code=r.status_code, detail=f"Erreur API: {r.text}")
@@ -175,17 +188,21 @@ async def run_openai_style_chat(
     model: str,
     prompt: str,
     system: Optional[str],
+    history: Optional[List[HistoryMessage]],
     temperature: float,
     max_tokens: int,
     use_tools: bool,
     extra_headers: Optional[Dict[str, str]] = None,
 ) -> (str, List[ToolCallLog]):
-    """Gère la boucle complète prompt -> (appels d'outils éventuels) -> réponse finale,
-    pour tout fournisseur compatible OpenAI (Groq, Mistral, OpenRouter)."""
+    """Gere la boucle complete prompt -> (appels d'outils eventuels) -> reponse finale,
+    pour tout fournisseur compatible OpenAI (Groq, Mistral, OpenRouter), avec historique."""
 
     messages: List[Dict[str, Any]] = []
     if system:
         messages.append({"role": "system", "content": system})
+    for h in history or []:
+        role = "assistant" if h.role == "assistant" else "user"
+        messages.append({"role": role, "content": h.content})
     messages.append({"role": "user", "content": prompt})
 
     llm_tools = tools.get_openai_tools() if use_tools else None
@@ -200,7 +217,7 @@ async def run_openai_style_chat(
             choice = data["choices"][0]
             message = choice["message"]
         except (KeyError, IndexError):
-            raise HTTPException(status_code=502, detail=f"Réponse inattendue: {data}")
+            raise HTTPException(status_code=502, detail=f"Reponse inattendue: {data}")
 
         last_message = message
         tool_calls = message.get("tool_calls")
@@ -208,7 +225,6 @@ async def run_openai_style_chat(
         if not tool_calls:
             return message.get("content") or "", tools_used
 
-        # Ajoute le tour de l'assistant contenant les demandes d'appel d'outils
         messages.append(message)
 
         for tc in tool_calls:
@@ -231,8 +247,7 @@ async def run_openai_style_chat(
                 }
             )
 
-    # Nombre maximum d'itérations atteint : on renvoie le dernier contenu disponible
-    fallback_text = last_message.get("content") or "(Réponse tronquée après plusieurs appels d'outils.)"
+    fallback_text = last_message.get("content") or "(Reponse tronquee apres plusieurs appels d'outils.)"
     return fallback_text, tools_used
 
 
@@ -259,7 +274,7 @@ async def call_gemini_raw(
     if llm_tools:
         payload["tools"] = llm_tools
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
         r = await client.post(url, json=payload)
     if r.status_code != 200:
         raise HTTPException(status_code=r.status_code, detail=f"Erreur Gemini: {r.text}")
@@ -271,11 +286,17 @@ async def run_gemini_chat(
     api_key: str,
     prompt: str,
     system: Optional[str],
+    history: Optional[List[HistoryMessage]],
     temperature: float,
     max_tokens: int,
     use_tools: bool,
 ) -> (str, List[ToolCallLog]):
-    contents: List[Dict[str, Any]] = [{"role": "user", "parts": [{"text": prompt}]}]
+    contents: List[Dict[str, Any]] = []
+    for h in history or []:
+        role = "model" if h.role == "assistant" else "user"
+        contents.append({"role": role, "parts": [{"text": h.content}]})
+    contents.append({"role": "user", "parts": [{"text": prompt}]})
+
     llm_tools = tools.get_gemini_tools() if use_tools else None
     tools_used: List[ToolCallLog] = []
 
@@ -286,7 +307,7 @@ async def run_gemini_chat(
             candidate = data["candidates"][0]
             parts = candidate["content"]["parts"]
         except (KeyError, IndexError):
-            raise HTTPException(status_code=502, detail=f"Réponse Gemini inattendue: {data}")
+            raise HTTPException(status_code=502, detail=f"Reponse Gemini inattendue: {data}")
 
         last_parts = parts
         function_call_part = next((p for p in parts if "functionCall" in p), None)
@@ -295,7 +316,6 @@ async def run_gemini_chat(
             text = "".join(p.get("text", "") for p in parts)
             return text, tools_used
 
-        # Ajoute le tour du modèle contenant la demande d'appel de fonction
         contents.append({"role": "model", "parts": parts})
 
         fc = function_call_part["functionCall"]
@@ -306,18 +326,15 @@ async def run_gemini_chat(
         tools_used.append(ToolCallLog(name=fn_name, arguments=fn_args, result=result))
 
         contents.append(
-            {
-                "role": "function",
-                "parts": [{"functionResponse": {"name": fn_name, "response": {"result": result}}}],
-            }
+            {"role": "function", "parts": [{"functionResponse": {"name": fn_name, "response": {"result": result}}}]}
         )
 
-    fallback_text = "".join(p.get("text", "") for p in last_parts) or "(Réponse tronquée après plusieurs appels d'outils.)"
+    fallback_text = "".join(p.get("text", "") for p in last_parts) or "(Reponse tronquee apres plusieurs appels d'outils.)"
     return fallback_text, tools_used
 
 
 # ----------------------------------------------------------------------------
-# Dispatch générique par fournisseur
+# Dispatch generique par fournisseur
 # ----------------------------------------------------------------------------
 
 async def dispatch_to_provider(
@@ -325,6 +342,7 @@ async def dispatch_to_provider(
     model: str,
     prompt: str,
     system: Optional[str],
+    history: Optional[List[HistoryMessage]],
     temperature: float,
     max_tokens: int,
     use_tools: bool,
@@ -337,26 +355,24 @@ async def dispatch_to_provider(
     if not api_key:
         raise HTTPException(
             status_code=500,
-            detail=f"Clé API manquante pour '{provider}'. Définissez la variable d'environnement {cfg['key_env']}.",
+            detail=f"Cle API manquante pour '{provider}'. Definissez la variable d'environnement {cfg['key_env']}.",
         )
 
     if cfg["family"] == "gemini":
-        return await run_gemini_chat(model, api_key, prompt, system, temperature, max_tokens, use_tools)
+        return await run_gemini_chat(model, api_key, prompt, system, history, temperature, max_tokens, use_tools)
 
     if cfg["family"] == "openai_compatible":
         return await run_openai_style_chat(
-            cfg["base_url"],
-            api_key,
-            model,
-            prompt,
-            system,
-            temperature,
-            max_tokens,
-            use_tools,
+            cfg["base_url"], api_key, model, prompt, system, history, temperature, max_tokens, use_tools,
             extra_headers=cfg.get("extra_headers"),
         )
 
-    raise HTTPException(status_code=400, detail=f"Fournisseur non implémenté: {provider}")
+    raise HTTPException(status_code=400, detail=f"Fournisseur non implemente: {provider}")
+
+
+def current_datetime_str() -> str:
+    """Date/heure courante formatee en francais, injectee dans le prompt systeme a chaque requete."""
+    return datetime.now().strftime("%A %d %B %Y %H:%M")
 
 
 # ----------------------------------------------------------------------------
@@ -365,18 +381,23 @@ async def dispatch_to_provider(
 
 @app.get("/")
 async def root():
-    return {"message": "Multi-LLM Backend actif", "current_brain": current_brain}
+    """Sert directement le HUD JARVIS : l'URL racine du deploiement Render affiche
+    immediatement le frontend, sans etape intermediaire."""
+    index_path = BASE_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(index_path)
+    return {"message": "JARVIS Backend actif", "current_brain": current_brain}
 
 
 @app.get("/health")
 async def health():
-    """Endpoint de santé utilisé par Render pour vérifier que le service tourne."""
+    """Endpoint de sante utilise par Render pour verifier que le service tourne."""
     return {"status": "ok"}
 
 
 @app.get("/providers")
 async def list_providers():
-    """Liste les fournisseurs disponibles, leurs modèles, et si leur clé API est configurée."""
+    """Liste les fournisseurs disponibles, leurs modeles, et si leur cle API est configuree."""
     result = {}
     for name, cfg in PROVIDERS.items():
         result[name] = {
@@ -389,22 +410,23 @@ async def list_providers():
         "current_brain": current_brain,
         "tools_available": [t["name"] for t in tools.TOOLS],
         "connector_configured": bool(os.getenv("GAS_WEBAPP_URL")),
+        "web_search_configured": bool(os.getenv("TAVILY_API_KEY")),
     }
 
 
 @app.get("/boot", response_model=BootResponse)
 async def boot():
-    """
-    Message d'accueil fixe affiché/lu par le frontend à la connexion.
-    Ce message n'est PAS généré par un LLM : il est renvoyé tel quel pour garantir
-    un boot instantané et toujours identique, sans dépendre d'un appel API externe.
-    """
-    return BootResponse(message=persona.BOOT_MESSAGE)
+    """Message d'accueil fixe affiche/lu par le frontend a la connexion (pas de LLM,
+    pour un demarrage instantane), protege par un try/except global."""
+    try:
+        return BootResponse(message=persona.BOOT_MESSAGE)
+    except Exception:
+        return BootResponse(message="Systeme en ligne.")
 
 
 @app.post("/switch-brain", response_model=SwitchBrainResponse)
 async def switch_brain(req: SwitchBrainRequest):
-    """Change dynamiquement le fournisseur / modèle LLM actif par défaut."""
+    """Change dynamiquement le fournisseur / modele LLM actif par defaut."""
     provider = req.provider.lower().strip()
 
     if provider not in PROVIDERS:
@@ -414,12 +436,11 @@ async def switch_brain(req: SwitchBrainRequest):
         )
 
     model = req.model or PROVIDERS[provider]["default_model"]
-
     current_brain["provider"] = provider
     current_brain["model"] = model
 
     return SwitchBrainResponse(
-        message=f"Cerveau actif changé pour '{provider}' ({model}).",
+        message=f"Cerveau actif change pour '{provider}' ({model}).",
         current_brain=current_brain,
     )
 
@@ -427,17 +448,20 @@ async def switch_brain(req: SwitchBrainRequest):
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     """
-    Envoie un prompt au LLM actif (ou à un fournisseur/modèle précisé ponctuellement), avec
-    la personnalité JARVIS (persona.py) toujours appliquée comme prompt système par défaut.
-    Le champ `system` de la requête, s'il est fourni, s'ajoute à cette personnalité au lieu
-    de la remplacer.
-    Si le LLM décide d'utiliser un outil (Drive, Gmail...), celui-ci est exécuté via le
-    connecteur Apps Script, le résultat est renvoyé au LLM, et sa réponse finale (enrichie
-    du résultat de l'outil) est retournée dans `response`. Les outils appelés sont listés
-    dans `tools_used`.
+    Envoie un prompt au LLM actif (ou a un fournisseur/modele precise ponctuellement), avec
+    la personnalite JARVIS toujours appliquee, enrichie a chaque requete de la date/heure
+    courante et du cerveau actif. L'historique de conversation transmis par le frontend est
+    reinjecte pour que JARVIS ne perde jamais le fil.
+
+    Deux court-circuits rapides, sans passer par le LLM :
+      - "Rappelle-toi que...", "Note que...", "Souviens-toi que..." -> memorisation immediate.
+      - "Passe sur Groq", "Quel cerveau utilises-tu ?" -> changement/etat du cerveau immediat.
+
+    Toute la logique d'appel LLM est protegee par un try/except global : le frontend ne
+    recoit jamais une erreur HTTP 500/404 brute, mais toujours une reponse JSON exploitable.
     """
     if not req.prompt or not req.prompt.strip():
-        raise HTTPException(status_code=400, detail="Le champ 'prompt' ne peut pas être vide.")
+        raise HTTPException(status_code=400, detail="Le champ 'prompt' ne peut pas etre vide.")
 
     provider = (req.provider or current_brain["provider"]).lower().strip()
     if provider not in PROVIDERS:
@@ -447,12 +471,11 @@ async def chat(req: ChatRequest):
         current_brain["model"] if provider == current_brain["provider"] else PROVIDERS[provider]["default_model"]
     )
 
-    # ------------------------------------------------------------------------
-    # Total Recall : si le prompt commence par "Rappelle-toi que...", "Souviens-toi
-    # que..." ou "Note que...", on court-circuite le LLM et on mémorise immédiatement,
-    # sans attendre de round-trip d'inférence. Désactivable via use_tools=False.
-    # ------------------------------------------------------------------------
     use_tools_flag = req.use_tools if req.use_tools is not None else True
+
+    # ------------------------------------------------------------------------
+    # Court-circuit 1 : Total Recall (memorisation instantanee)
+    # ------------------------------------------------------------------------
     if use_tools_flag:
         memory_content = total_recall.extract_memory_content(req.prompt)
         if memory_content:
@@ -461,29 +484,75 @@ async def chat(req: ChatRequest):
                 response_text = persona.get_memory_failure_line(result["error"])
             else:
                 response_text = persona.get_memory_confirmation()
-
             return ChatResponse(
                 provider=provider,
                 model=model,
-                response=response_text,
-                tools_used=[
-                    ToolCallLog(name="remember_note", arguments={"content": memory_content}, result=result)
-                ],
+                response=persona.clean_text_for_voice(response_text),
+                tools_used=[ToolCallLog(name="remember_note", arguments={"content": memory_content}, result=result)],
             )
 
-    effective_system = persona.build_effective_system_prompt(req.system)
+    # ------------------------------------------------------------------------
+    # Court-circuit 2 : commandes vocales de changement / etat du cerveau
+    # ------------------------------------------------------------------------
+    switch_target = persona.detect_brain_switch(req.prompt)
+    if switch_target and switch_target in PROVIDERS:
+        current_brain["provider"] = switch_target
+        current_brain["model"] = PROVIDERS[switch_target]["default_model"]
+        return ChatResponse(
+            provider=switch_target,
+            model=current_brain["model"],
+            response=persona.clean_text_for_voice(persona.get_brain_switch_confirmation(switch_target)),
+            tools_used=[],
+        )
+    if persona.detect_brain_query(req.prompt):
+        return ChatResponse(
+            provider=provider,
+            model=model,
+            response=persona.clean_text_for_voice(persona.get_brain_query_answer(current_brain["provider"])),
+            tools_used=[],
+        )
 
-    answer, tools_used = await dispatch_to_provider(
-        provider=provider,
-        model=model,
-        prompt=req.prompt,
-        system=effective_system,
-        temperature=req.temperature or 0.7,
-        max_tokens=req.max_tokens or 1024,
-        use_tools=use_tools_flag,
+    # ------------------------------------------------------------------------
+    # Appel LLM normal, protege globalement contre toute exception imprevue
+    # ------------------------------------------------------------------------
+    effective_system = persona.build_effective_system_prompt(
+        current_datetime=current_datetime_str(),
+        current_provider=current_brain["provider"],
+        extra_instructions=req.system,
     )
 
-    return ChatResponse(provider=provider, model=model, response=answer, tools_used=tools_used)
+    try:
+        answer, tools_used = await dispatch_to_provider(
+            provider=provider,
+            model=model,
+            prompt=req.prompt,
+            system=effective_system,
+            history=req.history,
+            temperature=req.temperature or 0.7,
+            max_tokens=req.max_tokens or 1024,
+            use_tools=use_tools_flag,
+        )
+    except HTTPException as e:
+        return ChatResponse(
+            provider=provider,
+            model=model,
+            response=f"Petit contretemps technique : {e.detail}",
+            tools_used=[],
+        )
+    except Exception as e:  # filet de securite ultime : jamais de 500 brut cote frontend
+        return ChatResponse(
+            provider=provider,
+            model=model,
+            response=f"Une erreur inattendue est survenue : {e}",
+            tools_used=[],
+        )
+
+    return ChatResponse(
+        provider=provider,
+        model=model,
+        response=persona.clean_text_for_voice(answer),
+        tools_used=tools_used,
+    )
 
 
 if __name__ == "__main__":
