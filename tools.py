@@ -58,6 +58,19 @@ TOOLS: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "get_file_details",
+        "description": (
+            "Recupere les metadonnees d'un fichier Drive (type, taille, derniere modification, URL) "
+            "sans en lire tout le contenu. Utile pour verifier qu'un fichier existe ou identifier son type "
+            "avant d'agir dessus."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"file_id_or_name": {"type": "string", "description": "ID ou nom du fichier."}},
+            "required": ["file_id_or_name"],
+        },
+    },
+    {
         "name": "organize_drive_file",
         "description": "Deplace un fichier Drive vers un autre dossier (organisation/rangement).",
         "parameters": {
@@ -96,6 +109,22 @@ TOOLS: List[Dict[str, Any]] = [
     },
     # ---------------- Docs ----------------
     {
+        "name": "create_google_doc",
+        "description": (
+            "Cree un nouveau Google Doc structure avec le titre et le contenu donnes. A utiliser "
+            "quand aucun document existant ne correspond a la demande (sinon, utiliser write_google_doc "
+            "sur le fichier existant)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Titre du nouveau document."},
+                "content": {"type": "string", "description": "Contenu textuel initial du document."},
+            },
+            "required": ["title", "content"],
+        },
+    },
+    {
         "name": "read_google_doc",
         "description": "Lit le contenu integral d'un Google Doc a partir de son nom ou de son ID.",
         "parameters": {
@@ -119,24 +148,47 @@ TOOLS: List[Dict[str, Any]] = [
     },
     # ---------------- Sheets ----------------
     {
+        "name": "create_google_sheet",
+        "description": (
+            "Cree une nouvelle Google Sheet, avec une ligne d'en-tetes optionnelle et des lignes "
+            "de donnees initiales optionnelles. A utiliser quand aucun tableau existant ne correspond "
+            "a la demande (sinon, utiliser append_google_sheet_row sur le fichier existant)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Titre de la nouvelle feuille de calcul."},
+                "headers": {"type": "array", "items": {"type": "string"}, "description": "Ligne d'en-tetes (colonnes), optionnelle."},
+                "rows": {
+                    "type": "array",
+                    "description": "Lignes de donnees initiales, optionnelles.",
+                    "items": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+            "required": ["title"],
+        },
+    },
+    {
         "name": "read_google_sheet",
-        "description": "Lit une plage de cellules d'une Google Sheet (ex: 'A1:C10').",
+        "description": "Lit une plage de cellules d'une Google Sheet existante (ex: 'A1:C10'), sur un onglet precis si besoin.",
         "parameters": {
             "type": "object",
             "properties": {
                 "sheet_id_or_name": {"type": "string", "description": "ID ou nom de la feuille de calcul."},
-                "range": {"type": "string", "description": "Plage a lire, ex 'A1:C10'. Par defaut, tout l'onglet actif."},
+                "sheet_name": {"type": "string", "description": "Nom de l'onglet a lire (optionnel, onglet actif par defaut)."},
+                "range": {"type": "string", "description": "Plage a lire, ex 'A1:C10'. Par defaut, tout l'onglet."},
             },
             "required": ["sheet_id_or_name"],
         },
     },
     {
         "name": "write_google_sheet",
-        "description": "Ecrit ou met a jour des valeurs dans une plage precise d'une Google Sheet.",
+        "description": "Ecrit ou met a jour des valeurs dans une plage precise d'une Google Sheet existante.",
         "parameters": {
             "type": "object",
             "properties": {
                 "sheet_id_or_name": {"type": "string", "description": "ID ou nom de la feuille de calcul."},
+                "sheet_name": {"type": "string", "description": "Nom de l'onglet cible (optionnel, onglet actif par defaut)."},
                 "range": {"type": "string", "description": "Plage a ecrire, ex 'A1:B2'."},
                 "values": {
                     "type": "array",
@@ -148,12 +200,31 @@ TOOLS: List[Dict[str, Any]] = [
         },
     },
     {
-        "name": "append_google_sheet_row",
-        "description": "Ajoute une nouvelle ligne a la fin d'une Google Sheet.",
+        "name": "update_sheet_cell",
+        "description": "Modifie la valeur d'une seule cellule dans une Google Sheet existante (ex: cellule 'B4').",
         "parameters": {
             "type": "object",
             "properties": {
                 "sheet_id_or_name": {"type": "string", "description": "ID ou nom de la feuille de calcul."},
+                "sheet_name": {"type": "string", "description": "Nom de l'onglet cible (optionnel, onglet actif par defaut)."},
+                "cell": {"type": "string", "description": "Reference de la cellule, ex 'B4'."},
+                "value": {"type": "string", "description": "Nouvelle valeur a inserer dans la cellule."},
+            },
+            "required": ["sheet_id_or_name", "cell", "value"],
+        },
+    },
+    {
+        "name": "append_google_sheet_row",
+        "description": (
+            "Ajoute une nouvelle ligne a la fin d'une Google Sheet existante. A utiliser sans hesiter "
+            "des que l'utilisateur mentionne un revenu, une depense ou toute entree a consigner dans "
+            "un tableau de suivi deja existant."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "sheet_id_or_name": {"type": "string", "description": "ID ou nom de la feuille de calcul."},
+                "sheet_name": {"type": "string", "description": "Nom de l'onglet cible (optionnel, onglet actif par defaut)."},
                 "row_values": {"type": "array", "items": {"type": "string"}, "description": "Valeurs de la nouvelle ligne, dans l'ordre des colonnes."},
             },
             "required": ["sheet_id_or_name", "row_values"],
@@ -243,21 +314,31 @@ _TOOL_FUNCTIONS = {
     "search_google_drive": lambda args: connector.search_google_drive(args.get("query", "")),
     "list_drive_files": lambda args: connector.list_drive_files(args.get("folder_name"), args.get("max_results", 20)),
     "read_drive_file": lambda args: connector.read_drive_file(args.get("file_id_or_name", "")),
+    "get_file_details": lambda args: connector.get_file_details(args.get("file_id_or_name", "")),
     "organize_drive_file": lambda args: connector.organize_drive_file(
         args.get("file_id_or_name", ""), args.get("target_folder_name", "")
     ),
     "save_note_to_drive": lambda args: connector.save_note_to_drive(args.get("title", ""), args.get("content", "")),
     "remember_note": lambda args: connector.remember_note(args.get("content", "")),
+    "create_google_doc": lambda args: connector.create_google_doc(args.get("title", ""), args.get("content", "")),
     "read_google_doc": lambda args: connector.read_google_doc(args.get("doc_id_or_name", "")),
     "write_google_doc": lambda args: connector.write_google_doc(
         args.get("doc_id_or_name", ""), args.get("content", ""), args.get("mode", "append")
     ),
-    "read_google_sheet": lambda args: connector.read_google_sheet(args.get("sheet_id_or_name", ""), args.get("range")),
+    "create_google_sheet": lambda args: connector.create_google_sheet(
+        args.get("title", ""), args.get("headers", []), args.get("rows", [])
+    ),
+    "read_google_sheet": lambda args: connector.read_google_sheet(
+        args.get("sheet_id_or_name", ""), args.get("range"), args.get("sheet_name")
+    ),
     "write_google_sheet": lambda args: connector.write_google_sheet(
-        args.get("sheet_id_or_name", ""), args.get("range", ""), args.get("values", [])
+        args.get("sheet_id_or_name", ""), args.get("range", ""), args.get("values", []), args.get("sheet_name")
+    ),
+    "update_sheet_cell": lambda args: connector.update_sheet_cell(
+        args.get("sheet_id_or_name", ""), args.get("cell", ""), args.get("value", ""), args.get("sheet_name")
     ),
     "append_google_sheet_row": lambda args: connector.append_google_sheet_row(
-        args.get("sheet_id_or_name", ""), args.get("row_values", [])
+        args.get("sheet_id_or_name", ""), args.get("row_values", []), args.get("sheet_name")
     ),
     "get_unread_emails": lambda args: connector.get_unread_emails(),
     "send_gmail": lambda args: connector.send_gmail(args.get("to", ""), args.get("subject", ""), args.get("body", "")),
