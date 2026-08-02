@@ -54,7 +54,7 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
             "google/gemini-2.0-flash-exp:free",
             "deepseek/deepseek-r1:free",
         ],
-        "default_model": "meta-llama/llama-3.3-70b-instruct:free",
+        "default_model": "nemotron-3-ultra-550b-a55b:free",
         "family": "openai_compatible",
         "base_url": "https://openrouter.ai/api/v1",
         "extra_headers": {
