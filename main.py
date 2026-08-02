@@ -21,40 +21,32 @@ from pydantic import BaseModel
 import tools
 import persona
 import total_recall
+import model_discovery
+import connector
 
 # ----------------------------------------------------------------------------
-# Configuration des fournisseurs (cles API lues via variables d'environnement)
+# Configuration des fournisseurs : uniquement les infos de connexion (cle API, famille
+# d'API, URL de base). AUCUN nom de modele n'est code en dur ici : les modeles disponibles
+# sont decouverts dynamiquement au runtime via model_discovery.py (GET /api/models).
 # ----------------------------------------------------------------------------
 
 PROVIDERS: Dict[str, Dict[str, Any]] = {
     "gemini": {
         "key_env": "GEMINI_API_KEY",
-        "models": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"],
-        "default_model": "gemini-2.5-flash",
         "family": "gemini",
     },
     "groq": {
         "key_env": "GROQ_API_KEY",
-        "models": ["llama-3.3-70b-versatile", "deepseek-r1-distill-llama-70b"],
-        "default_model": "llama-3.3-70b-versatile",
         "family": "openai_compatible",
         "base_url": "https://api.groq.com/openai/v1",
     },
     "mistral": {
         "key_env": "MISTRAL_API_KEY",
-        "models": ["mistral-small-latest", "open-mistral-7b"],
-        "default_model": "mistral-small-latest",
         "family": "openai_compatible",
         "base_url": "https://api.mistral.ai/v1",
     },
     "openrouter": {
         "key_env": "OPENROUTER_API_KEY",
-        "models": [
-            "meta-llama/llama-3.3-70b-instruct:free",
-            "google/gemini-2.0-flash-exp:free",
-            "deepseek/deepseek-r1:free",
-        ],
-        "default_model": "nemotron-3-ultra-550b-a55b:free",
         "family": "openai_compatible",
         "base_url": "https://openrouter.ai/api/v1",
         "extra_headers": {
@@ -67,14 +59,19 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
 MAX_TOOL_ITERATIONS = 5  # garde-fou contre les boucles d'appels d'outils infinies
 BASE_DIR = Path(__file__).resolve().parent
 
-# Etat global : le "cerveau" actuellement actif
-current_brain: Dict[str, str] = {
+# Etat global : le "cerveau" actuellement actif. Le modele n'est plus fige au demarrage : il
+# est resolu dynamiquement (meilleur modele disponible pour ce provider) des la premiere requete.
+current_brain: Dict[str, Optional[str]] = {
     "provider": os.getenv("DEFAULT_PROVIDER", "gemini"),
-    "model": os.getenv(
-        "DEFAULT_MODEL",
-        PROVIDERS.get(os.getenv("DEFAULT_PROVIDER", "gemini"), PROVIDERS["gemini"])["default_model"],
-    ),
+    "model": os.getenv("DEFAULT_MODEL") or None,
 }
+
+
+async def ensure_current_brain_model() -> str:
+    """Resout le modele actif s'il n'est pas encore connu, via decouverte dynamique."""
+    if not current_brain.get("model"):
+        current_brain["model"] = await model_discovery.get_default_model_for_provider(current_brain["provider"])
+    return current_brain["model"]
 
 # ----------------------------------------------------------------------------
 # FastAPI app
@@ -114,6 +111,7 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None      # override ponctuel du modele
     system: Optional[str] = None     # instructions ponctuelles additionnelles
     history: Optional[List[HistoryMessage]] = None  # historique de conversation (frontend -> backend)
+    image_base64: Optional[str] = None  # capture d'ecran ou image jointe (vision), sans prefixe data:
     temperature: Optional[float] = 0.7
     max_tokens: Optional[int] = 1024
     use_tools: Optional[bool] = True
@@ -130,6 +128,7 @@ class ChatResponse(BaseModel):
     model: str
     response: str
     tools_used: List[ToolCallLog] = []
+    source_node_ids: List[str] = []  # IDs de fichiers Drive touches par les outils, pour illuminer la Galaxie 3D
 
 
 class SwitchBrainRequest(BaseModel):
@@ -139,11 +138,37 @@ class SwitchBrainRequest(BaseModel):
 
 class SwitchBrainResponse(BaseModel):
     message: str
-    current_brain: Dict[str, str]
+    current_brain: Dict[str, Any]
 
 
 class BootResponse(BaseModel):
     message: str
+
+
+class ModelInfo(BaseModel):
+    id: str
+    name: str
+    provider: str
+    is_free: bool
+    supports_vision: bool
+    supports_tools: bool
+
+
+class GalaxyNode(BaseModel):
+    id: str
+    name: str
+    mime_type: str = ""
+    url: str = ""
+
+
+class GalaxyLink(BaseModel):
+    source: str
+    target: str
+
+
+class GalaxyResponse(BaseModel):
+    nodes: List[GalaxyNode]
+    links: List[GalaxyLink]
 
 
 # ----------------------------------------------------------------------------
@@ -193,9 +218,11 @@ async def run_openai_style_chat(
     max_tokens: int,
     use_tools: bool,
     extra_headers: Optional[Dict[str, str]] = None,
+    image_base64: Optional[str] = None,
 ) -> (str, List[ToolCallLog]):
     """Gere la boucle complete prompt -> (appels d'outils eventuels) -> reponse finale,
-    pour tout fournisseur compatible OpenAI (Groq, Mistral, OpenRouter), avec historique."""
+    pour tout fournisseur compatible OpenAI (Groq, Mistral, OpenRouter), avec historique et
+    support vision optionnel (image jointe encodee en base64)."""
 
     messages: List[Dict[str, Any]] = []
     if system:
@@ -203,7 +230,18 @@ async def run_openai_style_chat(
     for h in history or []:
         role = "assistant" if h.role == "assistant" else "user"
         messages.append({"role": role, "content": h.content})
-    messages.append({"role": "user", "content": prompt})
+
+    if image_base64:
+        # Format multimodal standard (OpenAI-compatible) : contenu = liste de blocs texte + image.
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}},
+            ],
+        })
+    else:
+        messages.append({"role": "user", "content": prompt})
 
     llm_tools = tools.get_openai_tools() if use_tools else None
     tools_used: List[ToolCallLog] = []
@@ -312,12 +350,17 @@ async def run_gemini_chat(
     temperature: float,
     max_tokens: int,
     use_tools: bool,
+    image_base64: Optional[str] = None,
 ) -> (str, List[ToolCallLog]):
     contents: List[Dict[str, Any]] = []
     for h in history or []:
         role = "model" if h.role == "assistant" else "user"
         contents.append({"role": role, "parts": [{"text": h.content}]})
-    contents.append({"role": "user", "parts": [{"text": prompt}]})
+
+    user_parts: List[Dict[str, Any]] = [{"text": prompt}]
+    if image_base64:
+        user_parts.append({"inline_data": {"mime_type": "image/png", "data": image_base64}})
+    contents.append({"role": "user", "parts": user_parts})
 
     llm_tools = tools.get_gemini_tools() if use_tools else None
     tools_used: List[ToolCallLog] = []
@@ -380,6 +423,7 @@ async def dispatch_to_provider(
     temperature: float,
     max_tokens: int,
     use_tools: bool,
+    image_base64: Optional[str] = None,
 ) -> (str, List[ToolCallLog]):
     if provider not in PROVIDERS:
         raise HTTPException(status_code=400, detail=f"Fournisseur inconnu: {provider}")
@@ -393,15 +437,60 @@ async def dispatch_to_provider(
         )
 
     if cfg["family"] == "gemini":
-        return await run_gemini_chat(model, api_key, prompt, system, history, temperature, max_tokens, use_tools)
+        return await run_gemini_chat(
+            model, api_key, prompt, system, history, temperature, max_tokens, use_tools, image_base64=image_base64
+        )
 
     if cfg["family"] == "openai_compatible":
         return await run_openai_style_chat(
             cfg["base_url"], api_key, model, prompt, system, history, temperature, max_tokens, use_tools,
-            extra_headers=cfg.get("extra_headers"),
+            extra_headers=cfg.get("extra_headers"), image_base64=image_base64,
         )
 
     raise HTTPException(status_code=400, detail=f"Fournisseur non implemente: {provider}")
+
+
+async def vision_chat_with_fallback(
+    prompt: str,
+    image_base64: str,
+    system: Optional[str],
+    history: Optional[List[HistoryMessage]],
+    temperature: float,
+    max_tokens: int,
+    use_tools: bool,
+    preferred_provider: Optional[str] = None,
+    preferred_model: Optional[str] = None,
+) -> (str, List[ToolCallLog], str, str):
+    """Envoie une image au meilleur modele vision disponible ; si l'appel echoue (quota, erreur
+    API, modele indisponible), bascule automatiquement sur le modele vision suivant de la liste,
+    decouverte dynamiquement (aucun nom de modele fige). Renvoie (reponse, tools_used, provider, model)."""
+    candidates = await model_discovery.get_vision_candidates(preferred_provider, preferred_model)
+    if not candidates:
+        raise HTTPException(
+            status_code=503,
+            detail="Aucun modele avec support vision n'a ete decouvert parmi les fournisseurs configures.",
+        )
+
+    last_error = None
+    for candidate in candidates:
+        try:
+            answer, tools_used = await dispatch_to_provider(
+                provider=candidate["provider"],
+                model=candidate["id"],
+                prompt=prompt,
+                system=system,
+                history=history,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                use_tools=use_tools,
+                image_base64=image_base64,
+            )
+            return answer, tools_used, candidate["provider"], candidate["id"]
+        except Exception as e:  # on essaie le candidat suivant plutot que d'echouer immediatement
+            last_error = e
+            continue
+
+    raise HTTPException(status_code=502, detail=f"Tous les modeles vision disponibles ont echoue : {last_error}")
 
 
 def current_datetime_str() -> str:
@@ -431,14 +520,11 @@ async def health():
 
 @app.get("/providers")
 async def list_providers():
-    """Liste les fournisseurs disponibles, leurs modeles, et si leur cle API est configuree."""
+    """Liste les fournisseurs configures (cle API presente ou non). Pour la liste detaillee des
+    modeles disponibles par fournisseur (decouverte dynamique), voir GET /api/models."""
     result = {}
     for name, cfg in PROVIDERS.items():
-        result[name] = {
-            "models": cfg["models"],
-            "default_model": cfg["default_model"],
-            "configured": bool(os.getenv(cfg["key_env"])),
-        }
+        result[name] = {"configured": bool(os.getenv(cfg["key_env"]))}
     return {
         "providers": result,
         "current_brain": current_brain,
@@ -446,6 +532,40 @@ async def list_providers():
         "connector_configured": bool(os.getenv("GAS_WEBAPP_URL")),
         "web_search_configured": bool(os.getenv("TAVILY_API_KEY")),
     }
+
+
+@app.get("/api/models", response_model=Dict[str, List[ModelInfo]])
+async def api_models(refresh: bool = False):
+    """Decouverte dynamique des modeles disponibles chez chaque fournisseur configure (aucun nom
+    de modele code en dur cote backend). Resultat en cache 5 min ; passer ?refresh=true pour forcer
+    une nouvelle interrogation des APIs de listing."""
+    try:
+        grouped = await model_discovery.discover_models(force_refresh=refresh)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Echec de la decouverte des modeles : {e}")
+    return grouped
+
+
+@app.get("/api/galaxy", response_model=GalaxyResponse)
+async def api_galaxy():
+    """Construit le graphe (nodes/links) des fichiers Google Drive de l'utilisateur, pour
+    alimenter la Galaxie 3D du frontend. Chaque fichier est un noeud ; chaque lien dossier -> fichier
+    est une arete."""
+    try:
+        graph = await connector.get_drive_graph()
+    except connector.ConnectorError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    nodes = [
+        GalaxyNode(id=item["id"], name=item.get("name", ""), mime_type=item.get("mimeType", ""), url=item.get("url", ""))
+        for item in graph.get("files", [])
+    ]
+    links = [
+        GalaxyLink(source=item["parentId"], target=item["id"])
+        for item in graph.get("files", [])
+        if item.get("parentId")
+    ]
+    return GalaxyResponse(nodes=nodes, links=links)
 
 
 @app.get("/boot", response_model=BootResponse)
@@ -469,7 +589,13 @@ async def switch_brain(req: SwitchBrainRequest):
             detail=f"Fournisseur inconnu '{provider}'. Choix possibles: {list(PROVIDERS.keys())}",
         )
 
-    model = req.model or PROVIDERS[provider]["default_model"]
+    model = req.model
+    if not model:
+        try:
+            model = await model_discovery.get_default_model_for_provider(provider)
+        except ValueError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
     current_brain["provider"] = provider
     current_brain["model"] = model
 
@@ -479,6 +605,27 @@ async def switch_brain(req: SwitchBrainRequest):
     )
 
 
+def extract_source_node_ids(tools_used: List[ToolCallLog]) -> List[str]:
+    """Parcourt les resultats d'outils pour en extraire les IDs de fichiers Drive touches,
+    afin que le frontend puisse illuminer les noeuds correspondants dans la Galaxie 3D."""
+    ids: List[str] = []
+
+    def collect(obj: Any):
+        if isinstance(obj, dict):
+            file_id = obj.get("id")
+            if isinstance(file_id, str) and file_id and file_id not in ids:
+                ids.append(file_id)
+            for value in obj.values():
+                collect(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                collect(item)
+
+    for call in tools_used:
+        collect(call.result)
+    return ids
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     """
@@ -486,6 +633,10 @@ async def chat(req: ChatRequest):
     la personnalite JARVIS toujours appliquee, enrichie a chaque requete de la date/heure
     courante et du cerveau actif. L'historique de conversation transmis par le frontend est
     reinjecte pour que JARVIS ne perde jamais le fil.
+
+    Si une image (capture d'ecran) est jointe (image_base64), la requete est automatiquement
+    routee vers le meilleur modele vision disponible, avec bascule (fallback) sur le modele
+    vision suivant en cas d'echec du premier - liste decouverte dynamiquement, aucun modele fige.
 
     Deux court-circuits rapides, sans passer par le LLM :
       - "Rappelle-toi que...", "Note que...", "Souviens-toi que..." -> memorisation immediate.
@@ -501,16 +652,22 @@ async def chat(req: ChatRequest):
     if provider not in PROVIDERS:
         raise HTTPException(status_code=400, detail=f"Fournisseur inconnu: {provider}")
 
-    model = req.model or (
-        current_brain["model"] if provider == current_brain["provider"] else PROVIDERS[provider]["default_model"]
-    )
+    try:
+        if req.model:
+            model = req.model
+        elif provider == current_brain["provider"]:
+            model = await ensure_current_brain_model()
+        else:
+            model = await model_discovery.get_default_model_for_provider(provider)
+    except ValueError as e:
+        return ChatResponse(provider=provider, model="", response=f"Petit contretemps technique : {e}", tools_used=[])
 
     use_tools_flag = req.use_tools if req.use_tools is not None else True
 
     # ------------------------------------------------------------------------
     # Court-circuit 1 : Total Recall (memorisation instantanee)
     # ------------------------------------------------------------------------
-    if use_tools_flag:
+    if use_tools_flag and not req.image_base64:
         memory_content = total_recall.extract_memory_content(req.prompt)
         if memory_content:
             result = await tools.execute_tool("remember_note", {"content": memory_content})
@@ -528,26 +685,30 @@ async def chat(req: ChatRequest):
     # ------------------------------------------------------------------------
     # Court-circuit 2 : commandes vocales de changement / etat du cerveau
     # ------------------------------------------------------------------------
-    switch_target = persona.detect_brain_switch(req.prompt)
-    if switch_target and switch_target in PROVIDERS:
-        current_brain["provider"] = switch_target
-        current_brain["model"] = PROVIDERS[switch_target]["default_model"]
-        return ChatResponse(
-            provider=switch_target,
-            model=current_brain["model"],
-            response=persona.clean_text_for_voice(persona.get_brain_switch_confirmation(switch_target)),
-            tools_used=[],
-        )
-    if persona.detect_brain_query(req.prompt):
-        return ChatResponse(
-            provider=provider,
-            model=model,
-            response=persona.clean_text_for_voice(persona.get_brain_query_answer(current_brain["provider"])),
-            tools_used=[],
-        )
+    if not req.image_base64:
+        switch_target = persona.detect_brain_switch(req.prompt)
+        if switch_target and switch_target in PROVIDERS:
+            try:
+                current_brain["provider"] = switch_target
+                current_brain["model"] = await model_discovery.get_default_model_for_provider(switch_target)
+            except ValueError as e:
+                return ChatResponse(provider=provider, model=model, response=f"Petit contretemps technique : {e}", tools_used=[])
+            return ChatResponse(
+                provider=switch_target,
+                model=current_brain["model"],
+                response=persona.clean_text_for_voice(persona.get_brain_switch_confirmation(switch_target)),
+                tools_used=[],
+            )
+        if persona.detect_brain_query(req.prompt):
+            return ChatResponse(
+                provider=provider,
+                model=model,
+                response=persona.clean_text_for_voice(persona.get_brain_query_answer(current_brain["provider"])),
+                tools_used=[],
+            )
 
     # ------------------------------------------------------------------------
-    # Appel LLM normal, protege globalement contre toute exception imprevue
+    # Appel LLM normal (ou vision avec fallback automatique), protege globalement
     # ------------------------------------------------------------------------
     effective_system = persona.build_effective_system_prompt(
         current_datetime=current_datetime_str(),
@@ -556,16 +717,30 @@ async def chat(req: ChatRequest):
     )
 
     try:
-        answer, tools_used = await dispatch_to_provider(
-            provider=provider,
-            model=model,
-            prompt=req.prompt,
-            system=effective_system,
-            history=req.history,
-            temperature=req.temperature or 0.7,
-            max_tokens=req.max_tokens or 1024,
-            use_tools=use_tools_flag,
-        )
+        if req.image_base64:
+            answer, tools_used, used_provider, used_model = await vision_chat_with_fallback(
+                prompt=req.prompt,
+                image_base64=req.image_base64,
+                system=effective_system,
+                history=req.history,
+                temperature=req.temperature or 0.7,
+                max_tokens=req.max_tokens or 1024,
+                use_tools=use_tools_flag,
+                preferred_provider=provider,
+                preferred_model=model,
+            )
+            provider, model = used_provider, used_model
+        else:
+            answer, tools_used = await dispatch_to_provider(
+                provider=provider,
+                model=model,
+                prompt=req.prompt,
+                system=effective_system,
+                history=req.history,
+                temperature=req.temperature or 0.7,
+                max_tokens=req.max_tokens or 1024,
+                use_tools=use_tools_flag,
+            )
     except HTTPException as e:
         return ChatResponse(
             provider=provider,
@@ -586,6 +761,7 @@ async def chat(req: ChatRequest):
         model=model,
         response=persona.clean_text_for_voice(answer),
         tools_used=tools_used,
+        source_node_ids=extract_source_node_ids(tools_used),
     )
 
 
