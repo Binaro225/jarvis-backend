@@ -76,6 +76,13 @@ async def read_drive_file(file_id_or_name: str) -> Dict[str, Any]:
     return result if isinstance(result, dict) else {"content": result}
 
 
+async def get_file_details(file_id_or_name: str) -> Dict[str, Any]:
+    """Recupere les metadonnees d'un fichier Drive (type, taille, derniere modification, URL),
+    sans en lire le contenu integral. Utile pour verifier l'existence/le type avant d'agir."""
+    result = await call_gas("get_file_details", {"fileIdOrName": file_id_or_name})
+    return result
+
+
 async def organize_drive_file(file_id_or_name: str, target_folder_name: str) -> Dict[str, Any]:
     """Deplace un fichier Drive vers un autre dossier."""
     result = await call_gas(
@@ -102,6 +109,12 @@ async def remember_note(content: str) -> Dict[str, Any]:
 # Docs
 # ----------------------------------------------------------------------------
 
+async def create_google_doc(title: str, content: str) -> Dict[str, Any]:
+    """Cree un nouveau Google Doc structure avec le titre et le contenu donnes."""
+    result = await call_gas("create_doc", {"title": title, "content": content})
+    return result
+
+
 async def read_google_doc(doc_id_or_name: str) -> Dict[str, Any]:
     """Lit le contenu integral d'un Google Doc."""
     result = await call_gas("read_doc", {"docIdOrName": doc_id_or_name})
@@ -118,21 +131,48 @@ async def write_google_doc(doc_id_or_name: str, content: str, mode: str = "appen
 # Sheets
 # ----------------------------------------------------------------------------
 
-async def read_google_sheet(sheet_id_or_name: str, range_: Optional[str] = None) -> Dict[str, Any]:
-    """Lit une plage de cellules d'une Google Sheet."""
-    result = await call_gas("read_sheet", {"sheetIdOrName": sheet_id_or_name, "range": range_})
-    return result if isinstance(result, dict) else {"values": result}
-
-
-async def write_google_sheet(sheet_id_or_name: str, range_: str, values: List[List[str]]) -> Dict[str, Any]:
-    """Ecrit/met a jour des valeurs dans une plage precise d'une Google Sheet."""
-    result = await call_gas("write_sheet", {"sheetIdOrName": sheet_id_or_name, "range": range_, "values": values})
+async def create_google_sheet(title: str, headers: Optional[List[str]] = None, rows: Optional[List[List[str]]] = None) -> Dict[str, Any]:
+    """Cree une nouvelle Google Sheet, avec en-tetes et lignes de donnees initiales optionnelles."""
+    result = await call_gas("create_sheet", {"title": title, "headers": headers or [], "rows": rows or []})
     return result
 
 
-async def append_google_sheet_row(sheet_id_or_name: str, row_values: List[str]) -> Dict[str, Any]:
-    """Ajoute une nouvelle ligne a la fin d'une Google Sheet."""
-    result = await call_gas("append_sheet_row", {"sheetIdOrName": sheet_id_or_name, "rowValues": row_values})
+async def read_google_sheet(sheet_id_or_name: str, range_: Optional[str] = None, sheet_name: Optional[str] = None) -> Dict[str, Any]:
+    """Lit une plage de cellules d'une Google Sheet, sur un onglet precis si fourni."""
+    result = await call_gas(
+        "read_sheet", {"sheetIdOrName": sheet_id_or_name, "range": range_, "sheetName": sheet_name}
+    )
+    return result if isinstance(result, dict) else {"values": result}
+
+
+async def write_google_sheet(
+    sheet_id_or_name: str, range_: str, values: List[List[str]], sheet_name: Optional[str] = None
+) -> Dict[str, Any]:
+    """Ecrit/met a jour des valeurs dans une plage precise d'une Google Sheet."""
+    result = await call_gas(
+        "write_sheet",
+        {"sheetIdOrName": sheet_id_or_name, "range": range_, "values": values, "sheetName": sheet_name},
+    )
+    return result
+
+
+async def update_sheet_cell(
+    sheet_id_or_name: str, cell: str, value: str, sheet_name: Optional[str] = None
+) -> Dict[str, Any]:
+    """Modifie la valeur d'une seule cellule dans une Google Sheet."""
+    result = await call_gas(
+        "update_cell", {"sheetIdOrName": sheet_id_or_name, "cell": cell, "value": value, "sheetName": sheet_name}
+    )
+    return result
+
+
+async def append_google_sheet_row(
+    sheet_id_or_name: str, row_values: List[str], sheet_name: Optional[str] = None
+) -> Dict[str, Any]:
+    """Ajoute une nouvelle ligne a la fin d'une Google Sheet (sur l'onglet precise si fourni)."""
+    result = await call_gas(
+        "append_sheet_row", {"sheetIdOrName": sheet_id_or_name, "rowValues": row_values, "sheetName": sheet_name}
+    )
     return result
 
 
