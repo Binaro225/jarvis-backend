@@ -70,6 +70,13 @@ async def list_drive_files(folder_name: Optional[str] = None, max_results: int =
     return {"results": results}
 
 
+async def get_drive_graph(max_results: int = 300) -> Dict[str, Any]:
+    """Recupere une vue plate des fichiers Drive de l'utilisateur (id, nom, type, dossier parent),
+    utilisee pour construire le graphe nodes/links de la Galaxie 3D cote frontend."""
+    result = await call_gas("get_drive_graph", {"maxResults": max_results})
+    return result if isinstance(result, dict) else {"files": result}
+
+
 async def read_drive_file(file_id_or_name: str) -> Dict[str, Any]:
     """Lit le contenu textuel d'un fichier Drive (Doc, Sheet, ou fichier texte)."""
     result = await call_gas("read_drive_file", {"fileIdOrName": file_id_or_name})
