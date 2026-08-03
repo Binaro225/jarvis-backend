@@ -1,8 +1,7 @@
 /**
  * JarvisInterface.jsx
  * --------------------
- * Interface JARVIS avec écoute fluide, filtre anti-bruit et suppression 
- * des bips intempestifs du micro.
+ * Correction : Suppression des boucles de messages + Gestion silencieuse du micro
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
@@ -34,16 +33,15 @@ export default function JarvisInterface() {
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
 
   const [textValue, setTextValue] = useState('');
-  const [handsFreeActive, setHandsFreeActive] = useState(false);
+  const [isListening, setIsListening] = useState(false);
 
   const historyRef = useRef([]);
   const recognitionRef = useRef(null);
-  const isListeningRef = useRef(false);
   const isSpeakingRef = useRef(false);
-  const silenceTimerRef = useRef(null);
+  const transcriptBufferRef = useRef('');
 
   // --------------------------------------------------------------------------
-  // Initialisation du serveur & voix
+  // Chargement Initial
   // --------------------------------------------------------------------------
   const loadGalaxy = useCallback(async (url) => {
     try {
@@ -82,27 +80,7 @@ export default function JarvisInterface() {
   }, []);
 
   // --------------------------------------------------------------------------
-  // Micro silencieux et contrôle strict
-  // --------------------------------------------------------------------------
-  const stopListening = useCallback(() => {
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    isListeningRef.current = false;
-    if (recognitionRef.current) {
-      try { recognitionRef.current.abort(); } catch (e) {} // abort() ferme le micro sans émettre le bip de fin
-    }
-  }, []);
-
-  const startListening = useCallback(() => {
-    if (isSpeakingRef.current) return;
-    if (recognitionRef.current && !isListeningRef.current) {
-      try {
-        recognitionRef.current.start();
-      } catch (e) {}
-    }
-  }, []);
-
-  // --------------------------------------------------------------------------
-  // Synthèse Vocale Fluiide
+  // Synthèse Vocale (Bloque le micro pendant la réponse)
   // --------------------------------------------------------------------------
   const speak = useCallback((text) => {
     if (!window.speechSynthesis || !text) {
@@ -111,8 +89,6 @@ export default function JarvisInterface() {
       return;
     }
 
-    // Arrêt immédiat du micro pour éviter tout conflit sonore
-    stopListening();
     isSpeakingRef.current = true;
     window.speechSynthesis.cancel();
 
@@ -128,28 +104,23 @@ export default function JarvisInterface() {
     const handleSpeechEnd = () => {
       isSpeakingRef.current = false;
       setJarvisState('idle');
-
-      // Relance le micro seulement si l'utilisateur est toujours en mode mains-libres
-      if (handsFreeActive) {
-        setTimeout(() => {
-          if (!isSpeakingRef.current) startListening();
-        }, 1200);
-      }
     };
 
     utter.onend = handleSpeechEnd;
     utter.onerror = handleSpeechEnd;
 
     window.speechSynthesis.speak(utter);
-  }, [handsFreeActive, startListening, stopListening]);
+  }, []);
 
   // --------------------------------------------------------------------------
-  // Communication Backend
+  // Envoi au Backend (Sans Boucle)
   // --------------------------------------------------------------------------
   const sendPrompt = useCallback(async (prompt) => {
     if (!prompt || !prompt.trim() || !backendUrl) return;
 
-    stopListening();
+    // Vider le buffer immédiatement pour empêcher toute répitation
+    transcriptBufferRef.current = '';
+
     const snapshot = historyRef.current.slice();
     historyRef.current = [...historyRef.current, { role: 'user', content: prompt }].slice(-MAX_HISTORY_MESSAGES);
 
@@ -178,15 +149,15 @@ export default function JarvisInterface() {
 
       speak(data.response || '');
     } catch (e) {
-      setResponseText("Problème de connexion.");
+      setResponseText("Erreur de connexion avec le backend.");
       setCardVisible(true);
       setJarvisState('idle');
       isSpeakingRef.current = false;
     }
-  }, [backendUrl, selectedProvider, selectedModel, speak, stopListening]);
+  }, [backendUrl, selectedProvider, selectedModel, speak]);
 
   // --------------------------------------------------------------------------
-  // Écoute intelligente (Pause de silence de 1.8 seconde avant envoi)
+  // Reconnaissance Vocale Ponctuelle (Empêche les bips en boucle)
   // --------------------------------------------------------------------------
   useEffect(() => {
     const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -194,69 +165,63 @@ export default function JarvisInterface() {
 
     const recognition = new SpeechRecognitionCtor();
     recognition.lang = 'fr-FR';
-    recognition.continuous = true; // Permet de continuer à écouter même après une courte pause
-    recognition.interimResults = true; // Capture le texte au fur et à mesure que tu parles
-
-    let capturedText = '';
+    recognition.continuous = false; // Mode coup par coup : empêche le micro de tourner et biper sans arrêt
+    recognition.interimResults = false;
 
     recognition.onstart = () => {
-      if (isSpeakingRef.current) {
-        try { recognition.abort(); } catch(e){}
-        return;
-      }
-      isListeningRef.current = true;
+      setIsListening(true);
       setJarvisState('listening');
+      transcriptBufferRef.current = '';
     };
 
     recognition.onresult = (e) => {
-      let currentTranscript = '';
-      for (let i = 0; i < e.results.length; i++) {
-        currentTranscript += e.results[i][0].transcript;
-      }
-      capturedText = currentTranscript.trim();
-
-      // Réinitialise le timer de silence à chaque fois que tu prononces un mot
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-
-      // Si le texte est suffisant, on attend 1.8 seconde de SILENCE COMPLET avant d'envoyer
-      if (capturedText.length >= 4) {
-        silenceTimerRef.current = setTimeout(() => {
-          const textToSend = capturedText;
-          capturedText = '';
-          stopListening();
-          sendPrompt(textToSend);
-        }, 1800); // 1.8 seconde pour te laisser le temps de faire des pauses sans être coupé
+      if (e.results.length > 0) {
+        transcriptBufferRef.current = e.results[0][0].transcript;
       }
     };
 
     recognition.onend = () => {
-      isListeningRef.current = false;
-      if (!isSpeakingRef.current && handsFreeActive && jarvisState !== 'thinking') {
-        // Redémarrage discret si nécessaire
-      } else if (jarvisState !== 'thinking' && jarvisState !== 'speaking') {
+      setIsListening(false);
+      const finalText = transcriptBufferRef.current.trim();
+      
+      // Réinitialisation stricte
+      transcriptBufferRef.current = '';
+
+      if (finalText && finalText.length >= 2) {
+        sendPrompt(finalText);
+      } else {
         setJarvisState('idle');
       }
     };
 
     recognition.onerror = () => {
-      isListeningRef.current = false;
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      setIsListening(false);
+      transcriptBufferRef.current = '';
       setJarvisState('idle');
     };
 
     recognitionRef.current = recognition;
-  }, [handsFreeActive, jarvisState, sendPrompt, stopListening]);
+  }, [sendPrompt]);
 
-  const toggleHandsFree = () => {
-    if (handsFreeActive || isListeningRef.current) {
-      setHandsFreeActive(false);
+  const toggleMic = () => {
+    if (isSpeakingRef.current) {
+      window.speechSynthesis.cancel();
       isSpeakingRef.current = false;
-      if (window.speechSynthesis) window.speechSynthesis.cancel();
-      stopListening();
+    }
+
+    if (isListening) {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.abort(); } catch (e) {}
+      }
+      setIsListening(false);
       setJarvisState('idle');
     } else {
-      setHandsFreeActive(true);
-      startListening();
+      if (recognitionRef.current) {
+        try {
+          transcriptBufferRef.current = '';
+          recognitionRef.current.start();
+        } catch (e) {}
+      }
     }
   };
 
@@ -322,7 +287,7 @@ export default function JarvisInterface() {
       <div style={styles.inputbar}>
         <button
           style={{ ...styles.micBtn, ...(jarvisState === 'listening' ? styles.micBtnListening : {}) }}
-          onClick={toggleHandsFree}
+          onClick={toggleMic}
         >
           🎙
         </button>
