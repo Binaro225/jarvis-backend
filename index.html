@@ -88,14 +88,14 @@
 
     function JarvisApp() {
       const [input, setInput] = useState('');
-      const [lastResponse, setLastResponse] = useState('Système prêt. Écoute continue active.');
+      const [lastResponse, setLastResponse] = useState('Système prêt.');
       const [isListening, setIsListening] = useState(false);
       const [isSpeaking, setIsSpeaking] = useState(false);
       
       const recognitionRef = useRef(null);
-      const isSpeakingRef = useRef(false);
+      const isProcessingRef = useRef(false); // Empêche les envois multiples simultanés
 
-      // Préchargement immédiat des voix du système pour éliminer la latence
+      // Préchargement des voix synthétiques
       useEffect(() => {
         if ('speechSynthesis' in window) {
           window.speechSynthesis.getVoices();
@@ -105,79 +105,45 @@
         }
       }, []);
 
-      useEffect(() => {
-        isSpeakingRef.current = isSpeaking;
-      }, [isSpeaking]);
-
-      // Synthèse Vocale instantanée à vitesse normale
-      const speak = (text, onComplete) => {
+      // Synthèse Vocale
+      const speak = (text) => {
         if ('speechSynthesis' in window) {
-          window.speechSynthesis.cancel(); // Annule tout retard accumulé
+          window.speechSynthesis.cancel(); // Stoppe toute lecture en cours
           
           const utterance = new SpeechSynthesisUtterance(text);
           utterance.lang = 'fr-FR';
-          utterance.rate = 1.0; // Vitesse normale
+          utterance.rate = 1.0;
           utterance.pitch = 1.0;
           
           utterance.onstart = () => setIsSpeaking(true);
-          utterance.onend = () => {
+          
+          const handleEnd = () => {
             setIsSpeaking(false);
-            if (onComplete) onComplete();
-          };
-          utterance.onerror = () => {
-            setIsSpeaking(false);
-            if (onComplete) onComplete();
+            isProcessingRef.current = false; // Libère l'interface
           };
 
-          // Lancement immédiat
+          utterance.onend = handleEnd;
+          utterance.onerror = handleEnd;
+
           window.speechSynthesis.speak(utterance);
-        } else if (onComplete) {
-          onComplete();
+        } else {
+          isProcessingRef.current = false;
         }
       };
 
-      // Écoute permanente
-      useEffect(() => {
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SpeechRecognition) return;
+      // Fonction d'envoi unique (bloquée contre les boucles)
+      const sendMessage = async (textOverride) => {
+        const query = (textOverride !== undefined ? textOverride : input).trim();
+        if (!query || isProcessingRef.current) return;
 
-        const rec = new SpeechRecognition();
-        rec.lang = 'fr-FR';
-        rec.continuous = true;
-        rec.interimResults = false;
-
-        rec.onstart = () => setIsListening(true);
-        rec.onend = () => {
-          setIsListening(false);
-          if (!isSpeakingRef.current) {
-            try { rec.start(); } catch(e) {}
-          }
-        };
-
-        rec.onresult = (event) => {
-          const transcript = event.results[event.results.length - 1][0].transcript.trim();
-          if (transcript) {
-            setInput(transcript);
-            sendMessage(transcript);
-          }
-        };
-
-        recognitionRef.current = rec;
-        try { rec.start(); } catch(e) {}
-
-        return () => {
-          if (recognitionRef.current) recognitionRef.current.stop();
-        };
-      }, []);
-
-      const sendMessage = async (textToSend) => {
-        const query = textToSend || input;
-        if (!query.trim()) return;
-
+        isProcessingRef.current = true; // Verrouille pour éviter la boucle
         setInput('');
         setLastResponse("Analyse en cours...");
 
-        if (recognitionRef.current) recognitionRef.current.stop();
+        // Arrêt propre de la reconnaissance vocale s'il y en a une en cours
+        if (recognitionRef.current) {
+          try { recognitionRef.current.stop(); } catch(e) {}
+        }
 
         try {
           const response = await fetch('/chat', {
@@ -190,22 +156,66 @@
             const data = await response.json();
             const reply = data.response || data.message || "Opération terminée.";
             setLastResponse(reply);
-            speak(reply, () => {
-              try { recognitionRef.current.start(); } catch(e) {}
-            });
+            speak(reply);
           } else {
             const errText = "Erreur de communication avec le serveur backend.";
             setLastResponse(errText);
-            speak(errText, () => {
-              try { recognitionRef.current.start(); } catch(e) {}
-            });
+            speak(errText);
           }
         } catch (err) {
           const offlineText = "Impossible de contacter le serveur.";
           setLastResponse(offlineText);
-          speak(offlineText, () => {
-            try { recognitionRef.current.start(); } catch(e) {}
-          });
+          speak(offlineText);
+        }
+      };
+
+      // Gestion Manuelle du Micro (Bouton 🎤) -> Zéro Bip en Boucle
+      const toggleMic = () => {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+          alert("Reconnaissance vocale non supportée sur ce navigateur.");
+          return;
+        }
+
+        if (isListening) {
+          if (recognitionRef.current) {
+            try { recognitionRef.current.stop(); } catch(e) {}
+          }
+          setIsListening(false);
+        } else {
+          // Si Jarvis est en train de parler, on l'interrompt
+          if (isSpeaking) {
+            window.speechSynthesis.cancel();
+            setIsSpeaking(false);
+          }
+
+          const rec = new SpeechRecognition();
+          rec.lang = 'fr-FR';
+          rec.continuous = false; // MODE PONCTUEL : empêche le micro de tourner et biper sans arrêt
+          rec.interimResults = false;
+
+          rec.onstart = () => setIsListening(true);
+          
+          rec.onresult = (event) => {
+            if (event.results && event.results[0]) {
+              const transcript = event.results[0][0].transcript.trim();
+              setIsListening(false);
+              if (transcript) {
+                sendMessage(transcript);
+              }
+            }
+          };
+
+          rec.onerror = () => {
+            setIsListening(false);
+          };
+
+          rec.onend = () => {
+            setIsListening(false);
+          };
+
+          recognitionRef.current = rec;
+          try { rec.start(); } catch(e) {}
         }
       };
 
@@ -218,7 +228,7 @@
               J.A.R.V.I.S.
             </h1>
             <p className="text-[11px] text-cyan-500 uppercase tracking-widest mt-1">
-              {isSpeaking ? "• RÉPONSE EN COURS •" : isListening ? "• ÉCOUTE CONTINU •" : "• INITIALISATION •"}
+              {isSpeaking ? "• RÉPONSE EN COURS •" : isListening ? "• ÉCOUTE ACTIF •" : "• PRÊT •"}
             </p>
           </header>
 
@@ -245,24 +255,27 @@
           </main>
 
           <footer className="z-10 w-full max-w-md mx-auto bg-black/40 backdrop-blur-lg border border-cyan-500/30 rounded-full p-2 flex items-center gap-2 shadow-[0_0_20px_rgba(0,240,255,0.15)]">
-            <div className={`p-3 rounded-full border transition-all ${
-              isListening ? 'bg-cyan-500/30 border-cyan-400 text-cyan-200 animate-pulse' : 'bg-cyan-950/40 border-cyan-700 text-cyan-600'
-            }`}>
+            <button 
+              onClick={toggleMic}
+              className={`p-3 rounded-full border transition-all cursor-pointer ${
+                isListening ? 'bg-red-500/30 border-red-400 text-red-200 animate-pulse' : 'bg-cyan-950/40 border-cyan-700 text-cyan-400 hover:border-cyan-400'
+              }`}
+            >
               🎤
-            </div>
+            </button>
 
             <input
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
-              placeholder="Parlez directement ou tapez..."
+              placeholder="Écrire un message ou cliquer sur le micro..."
               className="w-full bg-transparent text-cyan-100 placeholder-cyan-600 outline-none px-3 text-sm"
             />
 
             <button
               onClick={() => sendMessage()}
-              className="bg-cyan-500/20 hover:bg-cyan-500/40 border border-cyan-400/50 text-cyan-300 px-5 py-2 rounded-full text-xs font-semibold tracking-wider uppercase"
+              className="bg-cyan-500/20 hover:bg-cyan-500/40 border border-cyan-400/50 text-cyan-300 px-5 py-2 rounded-full text-xs font-semibold tracking-wider uppercase cursor-pointer"
             >
               Envoyer
             </button>
