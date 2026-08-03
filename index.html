@@ -1,28 +1,40 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
-<title>J.A.R.V.I.S.</title>
-<meta name="theme-color" content="#02060c" />
-<meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="mobile-web-app-capable" content="yes" />
-<style>
-  html, body, #root {
-    margin: 0;
-    padding: 0;
-    width: 100%;
-    height: 100%;
-    height: 100dvh;
-    background: #02060c;
-    overflow: hidden;
-    -webkit-tap-highlight-color: transparent;
-  }
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+  <title>J.A.R.V.I.S.</title>
+  <meta name="theme-color" content="#02060c" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <style>
+    html, body, #root {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      height: 100dvh;
+      background: #02060c;
+      overflow: hidden;
+      -webkit-tap-highlight-color: transparent;
+    }
+  </style>
+
+  <!-- React & React DOM -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  
+  <!-- Three.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  
+  <!-- Compilateur Babel en direct -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </head>
 <body>
   <div id="root"></div>
-  <script type="module" src="./main.jsx"></script>
+
+  <!-- Chargement du JSX avec l'attribut type="text/babel" -->
+  <script type="text/babel" src="/main.jsx"></script>
 </body>
 </html>
