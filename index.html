@@ -7,18 +7,14 @@
   <meta name="theme-color" content="#02060c" />
   <style>
     html, body, #root {
-      margin: 0;
-      padding: 0;
-      width: 100%;
-      height: 100%;
-      height: 100dvh;
-      background: #02060c;
-      overflow: hidden;
-      font-family: system-ui, -apple-system, sans-serif;
+      margin: 0; padding: 0; width: 100%; height: 100%; height: 100dvh;
+      background: #02060c; overflow: hidden; font-family: system-ui, -apple-system, sans-serif;
     }
+    /* Scrollbar personnalisée cyan */
+    .custom-scroll::-webkit-scrollbar { width: 4px; }
+    .custom-scroll::-webkit-scrollbar-track { background: rgba(0,240,255,0.05); }
+    .custom-scroll::-webkit-scrollbar-thumb { background: rgba(0,240,255,0.3); border-radius: 4px; }
   </style>
-
-  <!-- CDNs -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -31,7 +27,7 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
-    function GalaxyCanvas() {
+    function GalaxyCanvas({ nodes }) {
       const mountRef = useRef(null);
 
       useEffect(() => {
@@ -43,16 +39,16 @@
         renderer.setSize(window.innerWidth, window.innerHeight);
         mount.appendChild(renderer.domElement);
 
+        const count = nodes && nodes.length > 0 ? nodes.length : 150;
         const geometry = new THREE.BufferGeometry();
-        const count = 2000;
         const positions = new Float32Array(count * 3);
 
         for (let i = 0; i < count * 3; i++) {
-          positions[i] = (Math.random() - 0.5) * 10;
+          positions[i] = (Math.random() - 0.5) * 12;
         }
 
         geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        const material = new THREE.PointsMaterial({ size: 0.02, color: 0x00f0ff });
+        const material = new THREE.PointsMaterial({ size: 0.04, color: 0x00f0ff });
         const points = new THREE.Points(geometry, material);
         scene.add(points);
 
@@ -61,8 +57,7 @@
         let animationFrameId;
         const animate = () => {
           animationFrameId = requestAnimationFrame(animate);
-          points.rotation.y += 0.002;
-          points.rotation.x += 0.001;
+          points.rotation.y += 0.0015;
           renderer.render(scene, camera);
         };
         animate();
@@ -81,9 +76,9 @@
             mount.removeChild(renderer.domElement);
           }
         };
-      }, []);
+      }, [nodes]);
 
-      return <div ref={mountRef} className="absolute inset-0 z-0" />;
+      return <div ref={mountRef} className="absolute inset-0 z-0 pointer-events-none" />;
     }
 
     function JarvisApp() {
@@ -91,59 +86,44 @@
       const [lastResponse, setLastResponse] = useState('Système prêt.');
       const [isListening, setIsListening] = useState(false);
       const [isSpeaking, setIsSpeaking] = useState(false);
+      const [galaxyNodes, setGalaxyNodes] = useState([]);
       
       const recognitionRef = useRef(null);
-      const isProcessingRef = useRef(false); // Empêche les envois multiples simultanés
+      const isProcessingRef = useRef(false);
 
-      // Préchargement des voix synthétiques
       useEffect(() => {
-        if ('speechSynthesis' in window) {
-          window.speechSynthesis.getVoices();
-          window.speechSynthesis.onvoiceschanged = () => {
-            window.speechSynthesis.getVoices();
-          };
-        }
+        // Chargement des éléments Google Drive depuis le Backend
+        fetch('/api/galaxy')
+          .then(res => res.json())
+          .then(data => setGalaxyNodes(data.nodes || []))
+          .catch(() => {});
       }, []);
 
-      // Synthèse Vocale
       const speak = (text) => {
         if ('speechSynthesis' in window) {
-          window.speechSynthesis.cancel(); // Stoppe toute lecture en cours
-          
+          window.speechSynthesis.cancel();
           const utterance = new SpeechSynthesisUtterance(text);
           utterance.lang = 'fr-FR';
-          utterance.rate = 1.0;
-          utterance.pitch = 1.0;
-          
           utterance.onstart = () => setIsSpeaking(true);
-          
           const handleEnd = () => {
             setIsSpeaking(false);
-            isProcessingRef.current = false; // Libère l'interface
+            isProcessingRef.current = false;
           };
-
           utterance.onend = handleEnd;
           utterance.onerror = handleEnd;
-
           window.speechSynthesis.speak(utterance);
         } else {
           isProcessingRef.current = false;
         }
       };
 
-      // Fonction d'envoi unique (bloquée contre les boucles)
       const sendMessage = async (textOverride) => {
         const query = (textOverride !== undefined ? textOverride : input).trim();
         if (!query || isProcessingRef.current) return;
 
-        isProcessingRef.current = true; // Verrouille pour éviter la boucle
+        isProcessingRef.current = true;
         setInput('');
         setLastResponse("Analyse en cours...");
-
-        // Arrêt propre de la reconnaissance vocale s'il y en a une en cours
-        if (recognitionRef.current) {
-          try { recognitionRef.current.stop(); } catch(e) {}
-        }
 
         try {
           const response = await fetch('/chat', {
@@ -154,111 +134,79 @@
 
           if (response.ok) {
             const data = await response.json();
-            const reply = data.response || data.message || "Opération terminée.";
+            const reply = data.response || "Opération terminée.";
             setLastResponse(reply);
             speak(reply);
           } else {
-            const errText = "Erreur de communication avec le serveur backend.";
-            setLastResponse(errText);
-            speak(errText);
+            setLastResponse("Erreur de communication backend.");
+            isProcessingRef.current = false;
           }
         } catch (err) {
-          const offlineText = "Impossible de contacter le serveur.";
-          setLastResponse(offlineText);
-          speak(offlineText);
+          setLastResponse("Erreur réseau.");
+          isProcessingRef.current = false;
         }
       };
 
-      // Gestion Manuelle du Micro (Bouton 🎤) -> Zéro Bip en Boucle
       const toggleMic = () => {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SpeechRecognition) {
-          alert("Reconnaissance vocale non supportée sur ce navigateur.");
-          return;
-        }
+        if (!SpeechRecognition) return;
 
         if (isListening) {
-          if (recognitionRef.current) {
-            try { recognitionRef.current.stop(); } catch(e) {}
-          }
+          if (recognitionRef.current) recognitionRef.current.stop();
           setIsListening(false);
         } else {
-          // Si Jarvis est en train de parler, on l'interrompt
           if (isSpeaking) {
             window.speechSynthesis.cancel();
             setIsSpeaking(false);
           }
-
           const rec = new SpeechRecognition();
           rec.lang = 'fr-FR';
-          rec.continuous = false; // MODE PONCTUEL : empêche le micro de tourner et biper sans arrêt
-          rec.interimResults = false;
-
+          rec.continuous = false;
           rec.onstart = () => setIsListening(true);
-          
-          rec.onresult = (event) => {
-            if (event.results && event.results[0]) {
-              const transcript = event.results[0][0].transcript.trim();
-              setIsListening(false);
-              if (transcript) {
-                sendMessage(transcript);
-              }
-            }
-          };
-
-          rec.onerror = () => {
+          rec.onresult = (e) => {
             setIsListening(false);
+            if (e.results[0]) sendMessage(e.results[0][0].transcript);
           };
-
-          rec.onend = () => {
-            setIsListening(false);
-          };
-
+          rec.onerror = () => setIsListening(false);
+          rec.onend = () => setIsListening(false);
           recognitionRef.current = rec;
-          try { rec.start(); } catch(e) {}
+          rec.start();
         }
       };
 
       return (
-        <div className="relative w-full h-screen text-cyan-400 flex flex-col justify-between p-6 z-10 select-none">
-          <GalaxyCanvas />
+        <div className="relative w-full h-screen text-cyan-400 flex flex-col justify-between p-4 z-10 select-none overflow-hidden">
+          <GalaxyCanvas nodes={galaxyNodes} />
           
-          <header className="z-10 text-center mt-2">
-            <h1 className="text-3xl font-bold tracking-[0.3em] text-cyan-300 drop-shadow-[0_0_12px_rgba(0,240,255,0.9)]">
+          <header className="z-10 text-center pt-2 flex-shrink-0">
+            <h1 className="text-2xl font-bold tracking-[0.3em] text-cyan-300 drop-shadow-[0_0_12px_rgba(0,240,255,0.9)]">
               J.A.R.V.I.S.
             </h1>
-            <p className="text-[11px] text-cyan-500 uppercase tracking-widest mt-1">
-              {isSpeaking ? "• RÉPONSE EN COURS •" : isListening ? "• ÉCOUTE ACTIF •" : "• PRÊT •"}
+            <p className="text-[10px] text-cyan-500 uppercase tracking-widest mt-1">
+              {isSpeaking ? "• RÉPONSE EN COURS •" : isListening ? "• ÉCOUTE ACTIVE •" : "• PRÊT •"}
             </p>
           </header>
 
-          <main className="z-10 flex-1 flex flex-col items-center justify-center px-4">
-            <div className={`w-36 h-36 rounded-full border-2 border-cyan-500/40 flex items-center justify-center transition-all duration-500 ${
-              isSpeaking 
-                ? 'scale-110 shadow-[0_0_50px_rgba(0,240,255,0.8)] border-cyan-300' 
-                : isListening 
-                ? 'scale-105 shadow-[0_0_35px_rgba(0,240,255,0.5)] border-cyan-400 animate-pulse' 
-                : 'shadow-[0_0_25px_rgba(0,240,255,0.3)]'
+          <!-- Zone de texte avec défilement scrollbar fixe -->
+          <main className="z-10 flex-1 flex flex-col items-center justify-center my-2 px-2 overflow-hidden">
+            <div className={`w-20 h-20 flex-shrink-0 rounded-full border border-cyan-500/40 flex items-center justify-center mb-3 transition-all ${
+              isSpeaking ? 'scale-110 shadow-[0_0_30px_rgba(0,240,255,0.8)]' : ''
             }`}>
-              <div className="w-24 h-24 rounded-full border border-cyan-300/80 flex items-center justify-center">
-                <div className={`w-12 h-12 rounded-full bg-cyan-400 shadow-[0_0_25px_#00f0ff] transition-all ${
-                  isSpeaking ? 'bg-cyan-200 scale-125' : ''
-                }`}></div>
-              </div>
+              <div className="w-8 h-8 rounded-full bg-cyan-400 shadow-[0_0_15px_#00f0ff]" />
             </div>
 
-            <div className="mt-8 max-w-md text-center">
-              <p className="text-base font-medium tracking-wide text-cyan-200 drop-shadow-[0_0_8px_rgba(0,240,255,0.6)] leading-relaxed">
+            <div className="w-full max-w-lg max-h-[45vh] overflow-y-auto custom-scroll bg-black/60 backdrop-blur-md border border-cyan-500/20 rounded-2xl p-4 shadow-[0_0_15px_rgba(0,240,255,0.1)]">
+              <p className="text-sm font-medium tracking-wide text-cyan-100 leading-relaxed whitespace-pre-wrap">
                 {lastResponse}
               </p>
             </div>
           </main>
 
-          <footer className="z-10 w-full max-w-md mx-auto bg-black/40 backdrop-blur-lg border border-cyan-500/30 rounded-full p-2 flex items-center gap-2 shadow-[0_0_20px_rgba(0,240,255,0.15)]">
+          <footer className="z-10 w-full max-w-md mx-auto bg-black/70 backdrop-blur-lg border border-cyan-500/30 rounded-full p-2 flex items-center gap-2 flex-shrink-0 mb-2">
             <button 
               onClick={toggleMic}
-              className={`p-3 rounded-full border transition-all cursor-pointer ${
-                isListening ? 'bg-red-500/30 border-red-400 text-red-200 animate-pulse' : 'bg-cyan-950/40 border-cyan-700 text-cyan-400 hover:border-cyan-400'
+              className={`p-3 rounded-full border transition-all ${
+                isListening ? 'bg-red-500/30 border-red-400 text-red-200 animate-pulse' : 'bg-cyan-950/40 border-cyan-700 text-cyan-400'
               }`}
             >
               🎤
@@ -269,15 +217,15 @@
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
-              placeholder="Écrire un message ou cliquer sur le micro..."
-              className="w-full bg-transparent text-cyan-100 placeholder-cyan-600 outline-none px-3 text-sm"
+              placeholder="Envoyer un message..."
+              className="w-full bg-transparent text-cyan-100 placeholder-cyan-600 outline-none px-2 text-sm"
             />
 
             <button
               onClick={() => sendMessage()}
-              className="bg-cyan-500/20 hover:bg-cyan-500/40 border border-cyan-400/50 text-cyan-300 px-5 py-2 rounded-full text-xs font-semibold tracking-wider uppercase cursor-pointer"
+              className="bg-cyan-500/20 hover:bg-cyan-500/40 border border-cyan-400/50 text-cyan-300 px-4 py-2 rounded-full text-xs font-semibold uppercase"
             >
-              Envoyer
+              OK
             </button>
           </footer>
         </div>
