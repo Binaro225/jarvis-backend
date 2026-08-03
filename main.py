@@ -848,7 +848,20 @@ import os
 async def serve_static_files(file_name: str):
     if file_name == "" or file_name == "/":
         return FileResponse("index.html")
+# --- CODE À AJOUTER À LA FIN DE MAIN.PY POUR LA ROUTE /CHAT ---
+from pydantic import BaseModel
+
+class ChatRequest(BaseModel):
+    message: str
+
+@app.post("/chat")
+async def chat_endpoint(req: ChatRequest):
+    user_text = req.message
     
+    # Remplacer cette ligne par l'appel à ton agent IA si nécessaire
+    reply = f"J'ai bien reçu votre commande : '{user_text}'. Analyse en cours."
+    
+    return {"response": reply}    
     if os.path.exists(file_name):
         if file_name.endswith((".jsx", ".js")):
             return FileResponse(file_name, media_type="text/javascript")
