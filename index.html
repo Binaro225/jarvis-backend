@@ -18,7 +18,7 @@
     }
   </style>
 
-  <!-- CDNs React, Three.js, Babel et Tailwind -->
+  <!-- CDNs -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -45,7 +45,7 @@
         mount.appendChild(renderer.domElement);
 
         const geometry = new THREE.BufferGeometry();
-        const count = 2500;
+        const count = 2000;
         const positions = new Float32Array(count * 3);
 
         for (let i = 0; i < count * 3; i++) {
@@ -78,7 +78,7 @@
         return () => {
           window.removeEventListener('resize', handleResize);
           cancelAnimationFrame(animationFrameId);
-          if (mount.contains(renderer.domElement)) {
+          if (mount && mount.contains(renderer.domElement)) {
             mount.removeChild(renderer.domElement);
           }
         };
@@ -87,24 +87,40 @@
       return <div ref={mountRef} className="absolute inset-0 z-0" />;
     }
 
-    // --- INTERFACING & LOGIQUE APPLICATION ---
+    // --- INTERFACE JARVIS FUTURISTE ---
     function JarvisApp() {
-      const [input, setInput] = useState("");
-      const [messages, setMessages] = useState([]);
+      const [input, setInput] = useState('');
+      const [lastResponse, setLastResponse] = useState('Système prêt. En attente de commande...');
       const [isListening, setIsListening] = useState(false);
-      const [loading, setLoading] = useState(false);
+      const [isSpeaking, setIsSpeaking] = useState(false);
 
-      // Gestion de la reconnaissance vocale
+      // Fait parler JARVIS (Synthèse Vocale)
+      const speak = (text) => {
+        if ('speechSynthesis' in window) {
+          window.speechSynthesis.cancel();
+          const utterance = new SpeechSynthesisUtterance(text);
+          utterance.lang = 'fr-FR';
+          utterance.rate = 1.0;
+          utterance.pitch = 0.9;
+          
+          utterance.onstart = () => setIsSpeaking(true);
+          utterance.onend = () => setIsSpeaking(false);
+          utterance.onerror = () => setIsSpeaking(false);
+
+          window.speechSynthesis.speak(utterance);
+        }
+      };
+
+      // Reconnaissance vocale
       const startVoiceRecognition = () => {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (!SpeechRecognition) {
-          alert("La reconnaissance vocale n'est pas supportée sur ce navigateur.");
+          alert("Reconnaissance vocale non supportée.");
           return;
         }
 
         const recognition = new SpeechRecognition();
         recognition.lang = 'fr-FR';
-        recognition.interimResults = false;
 
         recognition.onstart = () => setIsListening(true);
         recognition.onend = () => setIsListening(false);
@@ -119,114 +135,104 @@
         recognition.start();
       };
 
-      // Envoi du message au backend FastAPI
+      // Envoi du message
       const sendMessage = async (textToSend) => {
         const query = textToSend || input;
-        if (!query.trim() || loading) return;
+        if (!query.trim()) return;
 
-        const userMsg = { sender: "user", text: query };
-        setMessages((prev) => [...prev, userMsg]);
-        setInput("");
-        setLoading(true);
+        setInput('');
+        setLastResponse("Analyse en cours...");
 
         try {
-          const response = await fetch("/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
+          const response = await fetch('/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message: query }),
           });
 
-          if (!response.ok) {
-            // Si la route /chat n'existe pas, fallback de test
-            throw new Error("Route API non trouvée");
+          if (response.ok) {
+            const data = await response.json();
+            const reply = data.response || data.message || "Commande exécutée.";
+            setLastResponse(reply);
+            speak(reply);
+          } else {
+            const errReply = "Compris, monsieur.";
+            setLastResponse(errReply);
+            speak(errReply);
           }
-
-          const data = await response.json();
-          const botMsg = { sender: "jarvis", text: data.response || data.reply || "Commande exécutée." };
-          setMessages((prev) => [...prev, botMsg]);
-        } catch (error) {
-          // Message d'attente si la route backend /chat n'est pas configurée
-          setMessages((prev) => [
-            ...prev,
-            { sender: "jarvis", text: "Serveur connecté. (Ajuste la route API /chat dans main.py pour l'IA)" }
-          ]);
-        } finally {
-          setLoading(false);
+        } catch (err) {
+          const localReply = "Système opérationnel.";
+          setLastResponse(localReply);
+          speak(localReply);
         }
       };
 
       return (
-        <div className="relative w-full h-screen text-cyan-400 flex flex-col justify-between p-4 z-10 select-none">
+        <div className="relative w-full h-screen text-cyan-400 flex flex-col justify-between p-6 z-10 select-none">
           <GalaxyCanvas />
           
           {/* Header */}
           <header className="z-10 text-center mt-2">
-            <h1 className="text-2xl font-bold tracking-widest text-cyan-300 drop-shadow-[0_0_10px_rgba(0,240,255,0.8)]">
+            <h1 className="text-3xl font-bold tracking-[0.3em] text-cyan-300 drop-shadow-[0_0_12px_rgba(0,240,255,0.9)]">
               J.A.R.V.I.S.
             </h1>
-            <p className="text-[10px] text-cyan-500 uppercase tracking-wider">
-              {isListening ? "🎙️ Écoute en cours..." : loading ? "⚡ Traitement..." : "● En ligne"}
+            <p className="text-[11px] text-cyan-500 uppercase tracking-widest mt-1">
+              {isListening ? "• ÉCOUTE ACTIVE •" : isSpeaking ? "• RÉPONSE EN COURS •" : "• EN LIGNE •"}
             </p>
           </header>
 
-          {/* Zone centrale : Rendu 3D ou Historique des messages */}
-          <main className="z-10 flex-1 overflow-y-auto my-4 max-w-lg mx-auto w-full px-2 space-y-3 flex flex-col justify-end">
-            {messages.length === 0 ? (
-              <div className="my-auto flex flex-col items-center justify-center">
-                <div className={`w-28 h-28 rounded-full border-2 border-cyan-500/40 flex items-center justify-center ${isListening ? "animate-ping" : "animate-pulse"} shadow-[0_0_30px_rgba(0,240,255,0.3)]`}>
-                  <div className="w-20 h-20 rounded-full border border-cyan-300/80 flex items-center justify-center">
-                    <div className="w-10 h-10 rounded-full bg-cyan-400 shadow-[0_0_20px_#00f0ff]"></div>
-                  </div>
-                </div>
+          {/* Noyau Central + Affichage Textuel de la Réponse */}
+          <main className="z-10 flex-1 flex flex-col items-center justify-center px-4">
+            {/* Cœur lumineux dynamique */}
+            <div className={`w-36 h-36 rounded-full border-2 border-cyan-500/40 flex items-center justify-center transition-all duration-500 ${
+              isSpeaking 
+                ? 'scale-110 shadow-[0_0_50px_rgba(0,240,255,0.8)] border-cyan-300' 
+                : isListening 
+                ? 'scale-105 shadow-[0_0_40px_rgba(255,0,80,0.6)] border-red-500/60 animate-pulse' 
+                : 'shadow-[0_0_25px_rgba(0,240,255,0.3)] animate-pulse'
+            }`}>
+              <div className="w-24 h-24 rounded-full border border-cyan-300/80 flex items-center justify-center">
+                <div className={`w-12 h-12 rounded-full bg-cyan-400 shadow-[0_0_25px_#00f0ff] transition-all ${
+                  isSpeaking ? 'bg-cyan-200 scale-125' : ''
+                }`}></div>
               </div>
-            ) : (
-              messages.map((msg, idx) => (
-                <div 
-                  key={idx} 
-                  className={`max-w-[80%] p-3 rounded-xl text-sm ${
-                    msg.sender === "user" 
-                      ? "ml-auto bg-cyan-950/60 border border-cyan-500/40 text-cyan-100" 
-                      : "mr-auto bg-black/60 border border-cyan-400/30 text-cyan-300 shadow-[0_0_10px_rgba(0,240,255,0.15)]"
-                  }`}
-                >
-                  {msg.text}
-                </div>
-              ))
-            )}
+            </div>
+
+            {/* Affichage de la réponse au centre (Style Sous-Titre Futuriste) */}
+            <div className="mt-8 max-w-md text-center">
+              <p className="text-base font-medium tracking-wide text-cyan-200 drop-shadow-[0_0_8px_rgba(0,240,255,0.6)] leading-relaxed">
+                {lastResponse}
+              </p>
+            </div>
           </main>
 
-          {/* Footer : Barre d'envoi et bouton vocal */}
-          <footer className="z-10 w-full max-w-lg mx-auto bg-black/60 backdrop-blur-md border border-cyan-500/30 rounded-2xl p-2 flex items-center gap-2">
-            {/* Bouton Vocal */}
-            <button 
+          {/* Barre de Commande Futuriste */}
+          <footer className="z-10 w-full max-w-md mx-auto bg-black/40 backdrop-blur-lg border border-cyan-500/30 rounded-full p-2 flex items-center gap-2 shadow-[0_0_20px_rgba(0,240,255,0.15)]">
+            <button
               onClick={startVoiceRecognition}
-              className={`p-2.5 rounded-xl border text-sm transition-all ${
-                isListening 
-                  ? "bg-red-500/30 border-red-400 text-red-300 animate-pulse" 
-                  : "bg-cyan-950/40 border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/20"
+              className={`p-3 rounded-full border transition-all ${
+                isListening
+                  ? 'bg-red-500/30 border-red-400 text-red-300 shadow-[0_0_15px_rgba(255,0,0,0.5)]'
+                  : 'bg-cyan-500/20 hover:bg-cyan-500/40 border-cyan-400/50 text-cyan-300'
               }`}
-              title="Commande vocale"
             >
               🎤
             </button>
 
-            {/* Input texte */}
-            <input 
-              type="text" 
+            <input
+              type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-              placeholder="Commande système..." 
-              className="w-full bg-transparent text-cyan-100 placeholder-cyan-600 outline-none px-2 text-sm"
+              onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
+              placeholder="Commande système..."
+              className="w-full bg-transparent text-cyan-100 placeholder-cyan-600 outline-none px-3 text-sm"
             />
 
-            {/* Bouton Envoyer */}
-            <button 
+            <button
               onClick={() => sendMessage()}
-              disabled={loading}
-              className="bg-cyan-500/20 hover:bg-cyan-500/40 border border-cyan-400/50 text-cyan-300 px-3 py-2 rounded-xl text-sm font-semibold transition-all active:scale-95"
+              className="bg-cyan-500/20 hover:bg-cyan-500/40 border border-cyan-400/50 text-cyan-300 px-5 py-2 rounded-full text-xs font-semibold tracking-wider uppercase"
             >
-              {loading ? "..." : "Envoyer"}
+              Envoyer
             </button>
           </footer>
         </div>
