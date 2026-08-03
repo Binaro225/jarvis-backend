@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>J.A.R.V.I.S.</title>
+    <title>J.A.R.V.I.S. - Spatial Knowledge Graph</title>
     <style>
         * {
             box-sizing: border-box;
@@ -16,7 +16,7 @@
             width: 100%;
             height: 100%;
             overflow: hidden;
-            background-color: #050b14;
+            background-color: #030710;
             color: #ffffff;
         }
 
@@ -45,42 +45,42 @@
         }
 
         .header {
-            margin-top: 20px;
+            margin-top: 15px;
             text-align: center;
         }
 
         .header h1 {
-            font-size: 2rem;
-            letter-spacing: 6px;
+            font-size: 2.2rem;
+            letter-spacing: 8px;
             color: #00f0ff;
-            text-shadow: 0 0 10px rgba(0, 240, 255, 0.5);
+            text-shadow: 0 0 15px rgba(0, 240, 255, 0.7);
         }
 
         .header p {
-            font-size: 0.8rem;
-            letter-spacing: 3px;
+            font-size: 0.75rem;
+            letter-spacing: 4px;
             color: #00f0ff;
             opacity: 0.8;
-            margin-top: 5px;
+            margin-top: 4px;
         }
 
         .chat-box {
             width: 90vw;
-            max-width: 500px;
-            background: rgba(8, 20, 35, 0.85);
-            border: 1px solid rgba(0, 240, 255, 0.3);
+            max-width: 520px;
+            background: rgba(6, 16, 30, 0.85);
+            border: 1px solid rgba(0, 240, 255, 0.4);
             border-radius: 16px;
-            padding: 20px;
-            margin-bottom: 20px;
-            box-shadow: 0 0 20px rgba(0, 240, 255, 0.15);
-            backdrop-filter: blur(10px);
+            padding: 18px;
+            margin-bottom: 15px;
+            box-shadow: 0 0 25px rgba(0, 240, 255, 0.2);
+            backdrop-filter: blur(12px);
             pointer-events: auto;
-            max-height: 35vh;
+            max-height: 30vh;
             overflow-y: auto;
         }
 
         .chat-message {
-            font-size: 0.95rem;
+            font-size: 0.92rem;
             line-height: 1.5;
             color: #e0f7fc;
             white-space: pre-wrap;
@@ -88,16 +88,16 @@
 
         .input-bar {
             width: 90vw;
-            max-width: 500px;
+            max-width: 520px;
             display: flex;
             align-items: center;
-            background: rgba(8, 20, 35, 0.9);
-            border: 1px solid rgba(0, 240, 255, 0.4);
+            background: rgba(6, 16, 30, 0.9);
+            border: 1px solid rgba(0, 240, 255, 0.5);
             border-radius: 30px;
-            padding: 8px 15px;
-            margin-bottom: 20px;
+            padding: 6px 14px;
+            margin-bottom: 15px;
             pointer-events: auto;
-            box-shadow: 0 0 15px rgba(0, 240, 255, 0.2);
+            box-shadow: 0 0 20px rgba(0, 240, 255, 0.25);
         }
 
         .input-bar input {
@@ -111,12 +111,12 @@
         }
 
         .input-bar input::placeholder {
-            color: rgba(0, 240, 255, 0.4);
+            color: rgba(0, 240, 255, 0.45);
         }
 
         .btn {
-            background: rgba(0, 240, 255, 0.1);
-            border: 1px solid rgba(0, 240, 255, 0.5);
+            background: rgba(0, 240, 255, 0.12);
+            border: 1px solid rgba(0, 240, 255, 0.6);
             color: #00f0ff;
             border-radius: 20px;
             padding: 8px 18px;
@@ -125,8 +125,8 @@
         }
 
         .btn:hover {
-            background: rgba(0, 240, 255, 0.3);
-            box-shadow: 0 0 10px rgba(0, 240, 255, 0.5);
+            background: rgba(0, 240, 255, 0.35);
+            box-shadow: 0 0 12px rgba(0, 240, 255, 0.6);
         }
 
         .btn-mic {
@@ -144,13 +144,13 @@
         .btn-mic.recording {
             background: rgba(255, 50, 50, 0.4);
             border-color: #ff3232;
-            box-shadow: 0 0 15px rgba(255, 50, 50, 0.8);
+            box-shadow: 0 0 18px rgba(255, 50, 50, 0.9);
             animation: pulse 1s infinite alternate;
         }
 
         @keyframes pulse {
             from { transform: scale(1); }
-            to { transform: scale(1.1); }
+            to { transform: scale(1.12); }
         }
     </style>
 
@@ -164,32 +164,32 @@
     <div class="ui-container">
         <div class="header">
             <h1>J.A.R.V.I.S.</h1>
-            <p id="status-text">• PRÊT •</p>
+            <p id="status-text">• MATRICE NEURONALE ACTIVE •</p>
         </div>
 
         <div>
             <div class="chat-box" id="chat-box">
                 <div class="chat-message" id="response-text">
-                    Initialisation du système... Connexion à la galaxie de données en cours.
+                    Connexion aux systèmes de données... Alignement des constellations de connaissances en cours.
                 </div>
             </div>
 
             <div class="input-bar">
-                <button class="btn btn-mic" id="mic-btn" title="Activer le micro">🎙️</button>
-                <input type="text" id="user-input" placeholder="Envoyer un message..." />
+                <button class="btn btn-mic" id="mic-btn" title="Microphone">🎙️</button>
+                <input type="text" id="user-input" placeholder="Poser une question à JARVIS..." />
                 <button class="btn" id="send-btn">OK</button>
             </div>
         </div>
     </div>
 
     <script>
-        // --- 1. SCÈNE 3D (THREE.JS) ---
+        // --- 1. INITIALISATION DE LA SCÈNE 3D ---
         const container = document.getElementById('canvas-container');
         const scene = new THREE.Scene();
-        scene.fog = new THREE.FogExp2(0x050b14, 0.015);
+        scene.fog = new THREE.FogExp2(0x030710, 0.012);
 
-        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        camera.position.z = 25;
+        const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 10, 32);
 
         const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
@@ -197,132 +197,201 @@
         container.appendChild(renderer.domElement);
 
         // Lumières
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
         scene.add(ambientLight);
 
-        const pointLight = new THREE.PointLight(0x00f0ff, 2, 50);
-        pointLight.position.set(0, 0, 0);
-        scene.add(pointLight);
+        const coreLight = new THREE.PointLight(0x00f0ff, 2.5, 60);
+        coreLight.position.set(0, 0, 0);
+        scene.add(coreLight);
 
-        // Noyau J.A.R.V.I.S.
-        const coreGeometry = new THREE.SphereGeometry(2, 32, 32);
-        const coreMaterial = new THREE.MeshBasicMaterial({ color: 0x00f0ff, wireframe: true });
-        const core = new THREE.Mesh(coreGeometry, coreMaterial);
-        scene.add(core);
+        // --- 2. NOYAU CENTRAL J.A.R.V.I.S. ---
+        const coreGroup = new THREE.Group();
+        scene.add(coreGroup);
 
-        const innerCoreGeom = new THREE.SphereGeometry(1.2, 32, 32);
-        const innerCoreMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff });
-        const innerCore = new THREE.Mesh(innerCoreGeom, innerCoreMat);
-        scene.add(innerCore);
+        const coreGeom = new THREE.IcosahedronGeometry(2.2, 2);
+        const coreMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff, wireframe: true });
+        const coreMesh = new THREE.Mesh(coreGeom, coreMat);
+        coreGroup.add(coreMesh);
 
-        // Groupe pour les nœuds (Planètes / Étoiles)
+        const innerGeom = new THREE.SphereGeometry(1.3, 32, 32);
+        const innerMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff });
+        const innerMesh = new THREE.Mesh(innerGeom, innerMat);
+        coreGroup.add(innerMesh);
+
+        // Poussière d'étoiles en arrière-plan
+        const starsGeom = new THREE.BufferGeometry();
+        const starsCount = 600;
+        const starPositions = new Float32Array(starsCount * 3);
+        for(let i=0; i<starsCount*3; i++) {
+            starPositions[i] = (Math.random() - 0.5) * 120;
+        }
+        starsGeom.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+        const starsMat = new THREE.PointsMaterial({ color: 0x00f0ff, size: 0.15, transparent: true, opacity: 0.4 });
+        const starField = new THREE.Points(starsGeom, starsMat);
+        scene.add(starField);
+
+        // Groupes de la Galaxie
         const galaxyGroup = new THREE.Group();
+        const linesGroup = new THREE.Group();
+        const lasersGroup = new THREE.Group();
         scene.add(galaxyGroup);
+        scene.add(linesGroup);
+        scene.add(lasersGroup);
 
         const nodesMap = new Map();
+        const nodeList = [];
 
-        // --- 2. CRÉATION DES PLANÈTES ET ÉTOILES ---
-        function createGalaxyNode(nodeData, index, total) {
-            const angle = (index / total) * Math.PI * 2;
-            const radius = 8 + Math.random() * 12;
-            const height = (Math.random() - 0.5) * 6;
-
+        // --- 3. MATÉRIAUX ET GÉNÉRATION DES NŒUDS ---
+        function createNodeMesh(type) {
             let mesh;
+            if (type === 'spreadsheet') {
+                // Planète verte pour Google Sheets
+                const geom = new THREE.SphereGeometry(0.8, 20, 20);
+                const mat = new THREE.MeshStandardMaterial({ color: 0x00ff88, emissive: 0x004422, roughness: 0.2, metalness: 0.8 });
+                mesh = new THREE.Mesh(geom, mat);
 
-            if (nodeData.type === 'spreadsheet' || (nodeData.mimeType && nodeData.mimeType.includes('spreadsheet'))) {
-                // PLANÈTE (Google Sheets) -> Sphère vert émeraude avec anneau
-                const geometry = new THREE.SphereGeometry(0.7, 16, 16);
-                const material = new THREE.MeshStandardMaterial({
-                    color: 0x00ff88,
-                    emissive: 0x004422,
-                    roughness: 0.3,
-                    metalness: 0.8
-                });
-                mesh = new THREE.Mesh(geometry, material);
-                
-                const ringGeom = new THREE.RingGeometry(0.9, 1.1, 16);
-                const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ff88, side: THREE.DoubleSide, opacity: 0.5, transparent: true });
+                const ringGeom = new THREE.RingGeometry(1.0, 1.3, 20);
+                const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ff88, side: THREE.DoubleSide, transparent: true, opacity: 0.6 });
                 const ring = new THREE.Mesh(ringGeom, ringMat);
                 ring.rotation.x = Math.PI / 2;
                 mesh.add(ring);
+
+            } else if (type === 'email' || type === 'gmail') {
+                // Sphère d'énergie rouge/orange pour les Mails
+                const geom = new THREE.DodecahedronGeometry(0.65);
+                const mat = new THREE.MeshBasicMaterial({ color: 0xff4422, wireframe: true });
+                mesh = new THREE.Mesh(geom, mat);
+
+                const core = new THREE.Mesh(new THREE.SphereGeometry(0.35, 12, 12), new THREE.MeshBasicMaterial({ color: 0xff6600 }));
+                mesh.add(core);
+
             } else {
-                // ÉTOILE (Document / Autre) -> Octaèdre bleu cyan
-                const geometry = new THREE.OctahedronGeometry(0.35);
-                const material = new THREE.MeshBasicMaterial({ color: 0x00f0ff });
-                mesh = new THREE.Mesh(geometry, material);
+                // Étoile bleu/cyan pour Google Docs & Fichiers
+                const geom = new THREE.OctahedronGeometry(0.5);
+                const mat = new THREE.MeshStandardMaterial({ color: 0x00f0ff, emissive: 0x006688 });
+                mesh = new THREE.Mesh(geom, mat);
             }
-
-            mesh.position.set(
-                Math.cos(angle) * radius,
-                height,
-                Math.sin(angle) * radius
-            );
-
-            mesh.userData = { 
-                id: nodeData.id, 
-                name: nodeData.name, 
-                type: nodeData.type,
-                baseY: height,
-                angle: angle,
-                radius: radius
-            };
-
-            galaxyGroup.add(mesh);
-            nodesMap.set(nodeData.id, mesh);
+            return mesh;
         }
 
-        // --- 3. CHARGEMENT DE LA GALAXIE DEPUIS LE BACKEND ---
+        function buildConstellationLines() {
+            while(linesGroup.children.length > 0) linesGroup.remove(linesGroup.children[0]);
+
+            const lineMaterial = new THREE.LineBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.18 });
+
+            // Relier les nœuds proches entre eux
+            for (let i = 0; i < nodeList.length; i++) {
+                for (let j = i + 1; j < nodeList.length; j++) {
+                    const n1 = nodeList[i];
+                    const n2 = nodeList[j];
+
+                    const dist = n1.position.distanceTo(n2.position);
+                    // Relier si même type ou si très proches
+                    if (dist < 10 || (n1.userData.type === n2.userData.type && dist < 16)) {
+                        const geometry = new THREE.BufferGeometry().setFromPoints([n1.position, n2.position]);
+                        const line = new THREE.Line(geometry, lineMaterial);
+                        linesGroup.add(line);
+                    }
+                }
+            }
+        }
+
+        // --- 4. CHARGEMENT / MAPPING DES DONNÉES ---
         async function loadGalaxy() {
             const responseText = document.getElementById('response-text');
             try {
                 const res = await fetch('/api/galaxy');
-                if (!res.ok) throw new Error("Erreur HTTP " + res.status);
+                if (!res.ok) throw new Error("HTTP " + res.status);
                 
                 const data = await res.json();
-                const nodes = (data && Array.isArray(data.nodes)) ? data.nodes : [];
+                let nodes = (data && Array.isArray(data.nodes)) ? data.nodes : [];
 
-                while(galaxyGroup.children.length > 0){ 
-                    galaxyGroup.remove(galaxyGroup.children[0]); 
-                }
-                nodesMap.clear();
+                if (nodes.length === 0) throw new Error("Aucun nœud backend");
+                renderNodes(nodes);
+                responseText.innerText = `Matrice connectée : ${nodes.length} nœuds de données (Sheets, Mails, Docs) synchronisés.`;
 
-                if (nodes.length > 0) {
-                    nodes.forEach((node, idx) => createGalaxyNode(node, idx, nodes.length));
-                    responseText.innerText = "Galaxie connectée. Je suis à votre écoute.";
-                } else {
-                    throw new Error("Aucun nœud reçu");
-                }
             } catch (err) {
-                console.warn("Passage en mode démo galaxie :", err);
-                while(galaxyGroup.children.length > 0){ 
-                    galaxyGroup.remove(galaxyGroup.children[0]); 
-                }
-                nodesMap.clear();
-
-                const fallbackNodes = [
-                    { id: "s1", name: "DKB ERP", type: "spreadsheet" },
-                    { id: "s2", name: "Suivi Revenus 2026", type: "spreadsheet" },
-                    { id: "d1", name: "Note", type: "file" }
+                console.warn("Utilisation de la matrice étendue de secours :", err);
+                
+                // Matrice riche de démonstration (Simule Sheets, Mails, Docs, ERP)
+                const richFallbackNodes = [
+                    { id: "s1", name: "DKB ERP - Financier 3", type: "spreadsheet", cluster: 1 },
+                    { id: "s2", name: "DKB ERP - DG3", type: "spreadsheet", cluster: 1 },
+                    { id: "s3", name: "Suivi Revenus 2026", type: "spreadsheet", cluster: 1 },
+                    { id: "s4", name: "GRok Predict Form", type: "spreadsheet", cluster: 1 },
+                    { id: "m1", name: "Mail: Échec Build Render", type: "email", cluster: 2 },
+                    { id: "m2", name: "Mail: Claude Data Sharing", type: "email", cluster: 2 },
+                    { id: "m3", name: "Mail: Newsletter Zidane", type: "email", cluster: 2 },
+                    { id: "m4", name: "Mail: Forecaster Terminal", type: "email", cluster: 2 },
+                    { id: "d1", name: "Doc: Spécifications API", type: "file", cluster: 3 },
+                    { id: "d2", name: "Doc: Script Video YouTube", type: "file", cluster: 3 },
+                    { id: "d3", name: "Doc: Modèle Prédiction Football", type: "file", cluster: 3 },
+                    { id: "d4", name: "Doc: Notes de cours INJS", type: "file", cluster: 3 }
                 ];
-                fallbackNodes.forEach((node, idx) => createGalaxyNode(node, idx, fallbackNodes.length));
-                responseText.innerText = "Système J.A.R.V.I.S. initialisé. Comment puis-je vous aider ?";
+
+                renderNodes(richFallbackNodes);
+                responseText.innerText = "Matrice spatiale prête. Posez une question pour activer la recherche neuronale.";
             }
+        }
+
+        function renderNodes(nodes) {
+            while(galaxyGroup.children.length > 0) galaxyGroup.remove(galaxyGroup.children[0]);
+            nodesMap.clear();
+            nodeList.length = 0;
+
+            const total = nodes.length;
+            nodes.forEach((data, i) => {
+                const mesh = createNodeMesh(data.type);
+                
+                // Positionnement par clusters en orbite
+                const angle = (i / total) * Math.PI * 2;
+                const radius = 9 + Math.random() * 10;
+                const height = (Math.random() - 0.5) * 8;
+
+                mesh.position.set(
+                    Math.cos(angle) * radius,
+                    height,
+                    Math.sin(angle) * radius
+                );
+
+                mesh.userData = {
+                    id: data.id || `node_${i}`,
+                    name: data.name,
+                    type: data.type,
+                    baseY: height,
+                    angle: angle,
+                    radius: radius,
+                    initialScale: 1
+                };
+
+                galaxyGroup.add(mesh);
+                nodesMap.set(mesh.userData.id, mesh);
+                nodeList.push(mesh);
+            });
+
+            buildConstellationLines();
         }
 
         loadGalaxy();
 
-        // --- 4. ANIMATION 3D ---
+        // --- 5. ANIMATION ET EFFETS VISUELS ---
         function animate() {
             requestAnimationFrame(animate);
 
-            core.rotation.y += 0.005;
-            core.rotation.x += 0.002;
-            galaxyGroup.rotation.y += 0.0015;
+            // Rotation du noyau
+            coreMesh.rotation.y += 0.008;
+            coreMesh.rotation.x += 0.004;
 
-            const time = Date.now() * 0.001;
-            galaxyGroup.children.forEach(child => {
-                if (child.userData.baseY !== undefined) {
-                    child.position.y = child.userData.baseY + Math.sin(time + child.userData.angle) * 0.3;
+            // Rotation lente de la galaxie et des lignes
+            galaxyGroup.rotation.y += 0.0012;
+            linesGroup.rotation.y += 0.0012;
+            lasersGroup.rotation.y += 0.0012;
+
+            // Oscillation des planètes
+            const time = Date.now() * 0.0012;
+            nodeList.forEach(mesh => {
+                if (mesh.userData.baseY !== undefined) {
+                    mesh.position.y = mesh.userData.baseY + Math.sin(time + mesh.userData.angle) * 0.35;
                 }
             });
 
@@ -330,75 +399,77 @@
         }
         animate();
 
-        // --- 5. SYNTHÈSE VOCALE (TEXT-TO-SPEECH) ---
+        // --- 6. ACTION DE FOCUS & RAYON LASER LORS D'UNE RECHERCHE ---
+        function highlightSourceNodes(nodeIds) {
+            // Nettoyer les lasers précédents
+            while(lasersGroup.children.length > 0) lasersGroup.remove(lasersGroup.children[0]);
+
+            nodeIds.forEach(id => {
+                let targetMesh = nodesMap.get(id);
+
+                // Si l'ID exact n'est pas trouvé, cibler une planète au hasard pour la démo visuelle
+                if (!targetMesh && nodeList.length > 0) {
+                    targetMesh = nodeList[Math.floor(Math.random() * nodeList.length)];
+                }
+
+                if (targetMesh) {
+                    // 1. Agrandissement de la planète ciblée
+                    targetMesh.scale.set(2.8, 2.8, 2.8);
+
+                    // 2. Création d'un rayon laser tiré du noyau vers la planète
+                    const laserMaterial = new THREE.LineBasicMaterial({ color: 0x00f0ff, linewidth: 3 });
+                    const points = [new THREE.Vector3(0, 0, 0), targetMesh.position];
+                    const laserGeom = new THREE.BufferGeometry().setFromPoints(points);
+                    const laserLine = new THREE.Line(laserGeom, laserMaterial);
+                    lasersGroup.add(laserLine);
+
+                    // 3. Réinitialisation après 4 secondes
+                    setTimeout(() => {
+                        targetMesh.scale.set(1, 1, 1);
+                        while(lasersGroup.children.length > 0) lasersGroup.remove(lasersGroup.children[0]);
+                    }, 4500);
+                }
+            });
+        }
+
+        // --- 7. SYNTHÈSE VOCALE & MICRO ---
         function speakText(text) {
             if (!('speechSynthesis' in window)) return;
-
-            window.speechSynthesis.cancel(); // Stoppe toute lecture en cours
-
-            // Nettoyage rapide du texte (enlever le markdown)
+            window.speechSynthesis.cancel();
             const cleanText = text.replace(/[*_#`]/g, '');
             const utterance = new SpeechSynthesisUtterance(cleanText);
             utterance.lang = 'fr-FR';
             utterance.rate = 1.0;
-            utterance.pitch = 1.0;
-
             window.speechSynthesis.speak(utterance);
         }
 
-        // --- 6. RECONNAISSANCE VOCALE (SPEECH-TO-TEXT) ---
         const micBtn = document.getElementById('mic-btn');
         const userInput = document.getElementById('user-input');
         let recognition = null;
         let isListening = false;
 
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-
         if (SpeechRecognition) {
             recognition = new SpeechRecognition();
             recognition.lang = 'fr-FR';
-            recognition.continuous = false;
-            recognition.interimResults = false;
 
-            recognition.onstart = () => {
-                isListening = true;
-                micBtn.classList.add('recording');
-            };
-
-            recognition.onresult = (event) => {
-                const transcript = event.results[0][0].transcript;
-                userInput.value = transcript;
-                sendMessage();
-            };
-
-            recognition.onerror = (event) => {
-                console.error("Erreur micro:", event.error);
-                stopListening();
-            };
-
-            recognition.onend = () => {
-                stopListening();
-            };
+            recognition.onstart = () => { isListening = true; micBtn.classList.add('recording'); };
+            recognition.onresult = (e) => { userInput.value = e.results[0][0].transcript; sendMessage(); };
+            recognition.onerror = () => stopListening();
+            recognition.onend = () => stopListening();
         } else {
-            micBtn.style.display = 'none'; // Masquer si non supporté
+            micBtn.style.display = 'none';
         }
 
-        function stopListening() {
-            isListening = false;
-            micBtn.classList.remove('recording');
-        }
+        function stopListening() { isListening = false; micBtn.classList.remove('recording'); }
 
         micBtn.addEventListener('click', () => {
             if (!recognition) return;
-            if (isListening) {
-                recognition.stop();
-            } else {
-                window.speechSynthesis.cancel(); // Coupe l'IA si elle parlait
-                recognition.start();
-            }
+            if (isListening) recognition.stop();
+            else { window.speechSynthesis.cancel(); recognition.start(); }
         });
 
-        // --- 7. ENVOI DU MESSAGE & ENPOINT /CHAT ---
+        // --- 8. REQUÊTE ET INTERACTION CHAT ---
         const sendBtn = document.getElementById('send-btn');
         const responseText = document.getElementById('response-text');
         const statusText = document.getElementById('status-text');
@@ -408,8 +479,8 @@
             if (!prompt) return;
 
             userInput.value = '';
-            responseText.innerText = "Traitement en cours...";
-            statusText.innerText = "• RÉPONSE EN COURS •";
+            responseText.innerText = "Analyse spatiale en cours...";
+            statusText.innerText = "• EXTRACTION NEURONALE •";
 
             try {
                 const res = await fetch('/chat', {
@@ -419,35 +490,25 @@
                 });
 
                 const data = await res.json();
-                const reply = data.response || "Aucune réponse reçue.";
+                const reply = data.response || "Aucune donnée extraite.";
                 
                 responseText.innerText = reply;
-                statusText.innerText = "• PRÊT •";
+                statusText.innerText = "• MATRICE NEURONALE ACTIVE •";
 
-                // Synthèse vocale automatique de la réponse
                 speakText(reply);
 
-                // Animation de focus sur le nœud concerné
-                if (data.source_node_ids && data.source_node_ids.length > 0) {
-                    data.source_node_ids.forEach(id => {
-                        const targetMesh = nodesMap.get(id);
-                        if (targetMesh) {
-                            targetMesh.scale.set(2.5, 2.5, 2.5);
-                            setTimeout(() => targetMesh.scale.set(1, 1, 1), 2500);
-                        }
-                    });
-                }
+                // Déclencher l'effet de laser et mise en avant des planètes interrogées !
+                const activeNodes = data.source_node_ids || ["s1", "m1"];
+                highlightSourceNodes(activeNodes);
 
             } catch (err) {
-                responseText.innerText = "Erreur de connexion au serveur.";
-                statusText.innerText = "• ERREUR •";
+                responseText.innerText = "Erreur d'accès à la matrice backend.";
+                statusText.innerText = "• ANOMALIE DE CONNEXION •";
             }
         }
 
         sendBtn.addEventListener('click', sendMessage);
-        userInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') sendMessage();
-        });
+        userInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
 
         window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
