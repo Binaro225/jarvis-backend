@@ -64,6 +64,23 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
 MAX_TOOL_ITERATIONS = 5  # garde-fou contre les boucles d'appels d'outils infinies
 BASE_DIR = Path(__file__).resolve().parent
 
+# Alias tolerants : certains frontends nomment les fournisseurs differemment de nos cles
+# internes (ex: "google" au lieu de "gemini", "xai" au lieu de "grok"). On normalise avant
+# toute recherche dans PROVIDERS pour eviter une erreur "Fournisseur inconnu" evitable.
+PROVIDER_ALIASES: Dict[str, str] = {
+    "google": "gemini",
+    "google-gemini": "gemini",
+    "xai": "grok",
+    "x-ai": "grok",
+}
+
+
+def normalize_provider(name: Optional[str]) -> Optional[str]:
+    if not name:
+        return name
+    key = name.lower().strip()
+    return PROVIDER_ALIASES.get(key, key)
+
 # Etat global : le "cerveau" actuellement actif. Le modele n'est plus fige au demarrage : il
 # est resolu dynamiquement (meilleur modele disponible pour ce provider) des la premiere requete.
 current_brain: Dict[str, Optional[str]] = {
@@ -124,7 +141,7 @@ class ChatRequest(BaseModel):
     provider: Optional[str] = None   # override ponctuel, sans changer l'etat global
     model: Optional[str] = None      # override ponctuel du modele
     system: Optional[str] = None     # instructions ponctuelles additionnelles
-    history: Optional[List[HistoryMessage]] = None  # historique de conversation (frontend -> backend)
+    history: Optional[List[HistoryMessage]] = []  # historique de conversation (frontend -> backend)
     image_base64: Optional[str] = None  # capture d'ecran ou image jointe (vision), sans prefixe data:
     temperature: Optional[float] = 0.7
     max_tokens: Optional[int] = 1024
@@ -635,7 +652,7 @@ async def boot():
 
 async def _perform_brain_switch(provider: str, model: Optional[str] = None) -> SwitchBrainResponse:
     """Logique commune de bascule de cerveau, partagee par /switch-brain et /api/models/select."""
-    provider = provider.lower().strip()
+    provider = normalize_provider(provider)
     if provider not in PROVIDERS:
         raise HTTPException(
             status_code=400,
@@ -729,7 +746,7 @@ async def chat(req: ChatRequest):
     Toute la logique d'appel LLM est protegee par un try/except global : le frontend ne
     recoit jamais une erreur HTTP 500/404 brute, mais toujours une reponse JSON exploitable.
     """
-    provider = (req.provider or current_brain["provider"]).lower().strip()
+    provider = normalize_provider(req.provider) or current_brain["provider"]
     if provider not in PROVIDERS:
         raise HTTPException(status_code=400, detail=f"Fournisseur inconnu: {provider}")
 
