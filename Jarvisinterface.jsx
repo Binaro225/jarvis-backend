@@ -74,30 +74,61 @@ export default function JarvisInterface() {
     }
   }, [backendUrl, loadGalaxy, loadModels]);
 
+  // Initialisation/Préchargement des voix
+  useEffect(() => {
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.getVoices();
+      window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
+    }
+  }, []);
+
   // --------------------------------------------------------------------------
-  // Envoi d'un prompt au backend
+  // Synthèse vocale avec délai de sécurité avant réécoute
   // --------------------------------------------------------------------------
+  const startListening = useCallback(() => {
+    if (!recognitionRef.current) return;
+    try { recognitionRef.current.start(); } catch (e) { /* deja demarree */ }
+  }, []);
+
   const speak = useCallback((text) => {
     if (!window.speechSynthesis || !text) {
       setJarvisState(handsFreeActive ? 'listening' : 'idle');
-      if (handsFreeActive) startListening();
+      if (handsFreeActive) {
+        setTimeout(() => startListening(), 1500);
+      }
       return;
     }
-    if (isListeningRef.current && recognitionRef.current) recognitionRef.current.stop();
+
+    if (isListeningRef.current && recognitionRef.current) {
+      recognitionRef.current.stop();
+    }
+
     window.speechSynthesis.cancel();
     const utter = new SpeechSynthesisUtterance(text);
     utter.lang = 'fr-FR';
     utter.rate = 1.02;
-    utter.onstart = () => setJarvisState('speaking');
-    utter.onend = () => {
-      setJarvisState(handsFreeActive ? 'listening' : 'idle');
-      if (handsFreeActive) startListening();
-    };
-    utter.onerror = utter.onend;
-    window.speechSynthesis.speak(utter);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [handsFreeActive]);
 
+    utter.onstart = () => setJarvisState('speaking');
+
+    const handleEnd = () => {
+      setJarvisState(handsFreeActive ? 'listening' : 'idle');
+      if (handsFreeActive) {
+        // Pause de 1.5 seconde avant d'ouvrir le micro pour te laisser parler
+        setTimeout(() => {
+          startListening();
+        }, 1500);
+      }
+    };
+
+    utter.onend = handleEnd;
+    utter.onerror = handleEnd;
+
+    window.speechSynthesis.speak(utter);
+  }, [handsFreeActive, startListening]);
+
+  // --------------------------------------------------------------------------
+  // Envoi d'un prompt au backend
+  // --------------------------------------------------------------------------
   const sendPrompt = useCallback(async (prompt) => {
     if (!prompt || !prompt.trim() || !backendUrl) return;
 
@@ -133,17 +164,11 @@ export default function JarvisInterface() {
       setCardVisible(true);
       setJarvisState(handsFreeActive ? 'listening' : 'idle');
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backendUrl, selectedProvider, selectedModel, speak, handsFreeActive]);
 
   // --------------------------------------------------------------------------
-  // Session mains-libres (reconnaissance vocale en boucle)
+  // Session mains-libres (filtrage des faux départs)
   // --------------------------------------------------------------------------
-  const startListening = useCallback(() => {
-    if (!recognitionRef.current) return;
-    try { recognitionRef.current.start(); } catch (e) { /* deja demarree */ }
-  }, []);
-
   useEffect(() => {
     const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognitionCtor) return;
@@ -153,24 +178,33 @@ export default function JarvisInterface() {
     recognition.continuous = false;
     recognition.interimResults = true;
 
-    recognition.onstart = () => { isListeningRef.current = true; setJarvisState('listening'); };
+    recognition.onstart = () => { 
+      isListeningRef.current = true; 
+      setJarvisState('listening'); 
+    };
 
     let transcriptBuffer = '';
     recognition.onresult = (e) => {
       let transcript = '';
-      for (let i = 0; i < e.results.length; i++) transcript += e.results[i][0].transcript;
+      for (let i = 0; i < e.results.length; i++) {
+        transcript += e.results[i][0].transcript;
+      }
       transcriptBuffer = transcript;
-      if (e.results[e.results.length - 1].isFinal) recognition.stop();
+      if (e.results[e.results.length - 1].isFinal) {
+        recognition.stop();
+      }
     };
 
     recognition.onend = () => {
       isListeningRef.current = false;
       const finalText = transcriptBuffer.trim();
       transcriptBuffer = '';
-      if (finalText) {
+
+      // Filtre : requiert au moins 3 caractères
+      if (finalText && finalText.length >= 3) {
         sendPrompt(finalText);
       } else if (handsFreeActive) {
-        setTimeout(() => startListening(), 500);
+        setTimeout(() => startListening(), 1000);
       } else {
         setJarvisState('idle');
       }
@@ -178,12 +212,14 @@ export default function JarvisInterface() {
 
     recognition.onerror = () => {
       isListeningRef.current = false;
-      if (handsFreeActive) setTimeout(() => startListening(), 500);
-      else setJarvisState('idle');
+      if (handsFreeActive) {
+        setTimeout(() => startListening(), 1000);
+      } else {
+        setJarvisState('idle');
+      }
     };
 
     recognitionRef.current = recognition;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [handsFreeActive, sendPrompt, startListening]);
 
   const toggleHandsFree = () => {
@@ -304,7 +340,7 @@ export default function JarvisInterface() {
         </div>
       )}
 
-      {/* Selecteur de modele : chargement/choix a chaud, sans redemarrage serveur */}
+      {/* Selecteur de modele */}
       {modelPickerOpen && (
         <div style={styles.modalBackdrop} onClick={() => setModelPickerOpen(false)}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
@@ -338,7 +374,7 @@ export default function JarvisInterface() {
 }
 
 // ----------------------------------------------------------------------------
-// Styles (mobile-first, plein ecran, esthetique HUD cyan/amber)
+// Styles
 // ----------------------------------------------------------------------------
 
 const styles = {
