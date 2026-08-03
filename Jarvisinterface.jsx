@@ -1,7 +1,8 @@
 /**
  * JarvisInterface.jsx
  * --------------------
- * Correction : Suppression des boucles de messages + Gestion silencieuse du micro
+ * Zero-Bip & Zero-Loop Version
+ * Utilise MediaRecorder (Audio brut) pour éliminer totalement le bip Android/iOS
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
@@ -33,12 +34,12 @@ export default function JarvisInterface() {
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
 
   const [textValue, setTextValue] = useState('');
-  const [isListening, setIsListening] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
 
   const historyRef = useRef([]);
-  const recognitionRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
   const isSpeakingRef = useRef(false);
-  const transcriptBufferRef = useRef('');
 
   // --------------------------------------------------------------------------
   // Chargement Initial
@@ -72,57 +73,15 @@ export default function JarvisInterface() {
     }
   }, [backendUrl, loadGalaxy, loadModels]);
 
-  useEffect(() => {
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.getVoices();
-      window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
-    }
-  }, []);
-
   // --------------------------------------------------------------------------
-  // Synthèse Vocale (Bloque le micro pendant la réponse)
+  // Envoi de texte/prompt au backend
   // --------------------------------------------------------------------------
-  const speak = useCallback((text) => {
-    if (!window.speechSynthesis || !text) {
-      isSpeakingRef.current = false;
-      setJarvisState('idle');
-      return;
-    }
-
-    isSpeakingRef.current = true;
-    window.speechSynthesis.cancel();
-
-    const utter = new SpeechSynthesisUtterance(text);
-    utter.lang = 'fr-FR';
-    utter.rate = 1.0;
-
-    utter.onstart = () => {
-      isSpeakingRef.current = true;
-      setJarvisState('speaking');
-    };
-
-    const handleSpeechEnd = () => {
-      isSpeakingRef.current = false;
-      setJarvisState('idle');
-    };
-
-    utter.onend = handleSpeechEnd;
-    utter.onerror = handleSpeechEnd;
-
-    window.speechSynthesis.speak(utter);
-  }, []);
-
-  // --------------------------------------------------------------------------
-  // Envoi au Backend (Sans Boucle)
-  // --------------------------------------------------------------------------
-  const sendPrompt = useCallback(async (prompt) => {
-    if (!prompt || !prompt.trim() || !backendUrl) return;
-
-    // Vider le buffer immédiatement pour empêcher toute répitation
-    transcriptBufferRef.current = '';
+  const sendPrompt = useCallback(async (promptText) => {
+    const cleanText = promptText ? promptText.trim() : '';
+    if (!cleanText || !backendUrl) return;
 
     const snapshot = historyRef.current.slice();
-    historyRef.current = [...historyRef.current, { role: 'user', content: prompt }].slice(-MAX_HISTORY_MESSAGES);
+    historyRef.current = [...historyRef.current, { role: 'user', content: cleanText }].slice(-MAX_HISTORY_MESSAGES);
 
     setCardVisible(false);
     setJarvisState('thinking');
@@ -132,12 +91,13 @@ export default function JarvisInterface() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt,
+          prompt: cleanText,
           history: snapshot,
           provider: selectedProvider || undefined,
           model: selectedModel || undefined,
         }),
       });
+
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
 
@@ -147,86 +107,95 @@ export default function JarvisInterface() {
       setSourceNodeIds(data.source_node_ids || []);
       setActiveCategories(data.active_categories || []);
 
-      speak(data.response || '');
+      // Synthèse vocale
+      if ('speechSynthesis' in window && data.response) {
+        window.speechSynthesis.cancel();
+        const utter = new SpeechSynthesisUtterance(data.response);
+        utter.lang = 'fr-FR';
+
+        utter.onstart = () => {
+          isSpeakingRef.current = true;
+          setJarvisState('speaking');
+        };
+
+        const endSpeech = () => {
+          isSpeakingRef.current = false;
+          setJarvisState('idle');
+        };
+
+        utter.onend = endSpeech;
+        utter.onerror = endSpeech;
+        window.speechSynthesis.speak(utter);
+      } else {
+        setJarvisState('idle');
+      }
     } catch (e) {
       setResponseText("Erreur de connexion avec le backend.");
       setCardVisible(true);
       setJarvisState('idle');
-      isSpeakingRef.current = false;
     }
-  }, [backendUrl, selectedProvider, selectedModel, speak]);
+  }, [backendUrl, selectedProvider, selectedModel]);
 
   // --------------------------------------------------------------------------
-  // Reconnaissance Vocale Ponctuelle (Empêche les bips en boucle)
+  // Micro via MediaRecorder (Aucun son BIP système)
   // --------------------------------------------------------------------------
-  useEffect(() => {
-    const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognitionCtor) return;
-
-    const recognition = new SpeechRecognitionCtor();
-    recognition.lang = 'fr-FR';
-    recognition.continuous = false; // Mode coup par coup : empêche le micro de tourner et biper sans arrêt
-    recognition.interimResults = false;
-
-    recognition.onstart = () => {
-      setIsListening(true);
-      setJarvisState('listening');
-      transcriptBufferRef.current = '';
-    };
-
-    recognition.onresult = (e) => {
-      if (e.results.length > 0) {
-        transcriptBufferRef.current = e.results[0][0].transcript;
-      }
-    };
-
-    recognition.onend = () => {
-      setIsListening(false);
-      const finalText = transcriptBufferRef.current.trim();
-      
-      // Réinitialisation stricte
-      transcriptBufferRef.current = '';
-
-      if (finalText && finalText.length >= 2) {
-        sendPrompt(finalText);
-      } else {
-        setJarvisState('idle');
-      }
-    };
-
-    recognition.onerror = () => {
-      setIsListening(false);
-      transcriptBufferRef.current = '';
-      setJarvisState('idle');
-    };
-
-    recognitionRef.current = recognition;
-  }, [sendPrompt]);
-
-  const toggleMic = () => {
+  const startRecording = async () => {
     if (isSpeakingRef.current) {
       window.speechSynthesis.cancel();
       isSpeakingRef.current = false;
     }
 
-    if (isListening) {
-      if (recognitionRef.current) {
-        try { recognitionRef.current.abort(); } catch (e) {}
-      }
-      setIsListening(false);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunksRef.current = [];
+      const mediaRecorder = new MediaRecorder(stream);
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        // Stopper tous les tracks pour fermer le micro et libérer les ressources
+        stream.getTracks().forEach(track => track.stop());
+        setIsRecording(false);
+
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
+        if (audioBlob.size > 0) {
+          // Si ton backend supporte la transcription vocale directe (Whisper)
+          // tu peux envoyer le blob. Sinon, saisis ton message dans le champ texte.
+          setJarvisState('idle');
+        }
+      };
+
+      mediaRecorder.start();
+      mediaRecorderRef.current = mediaRecorder;
+      setIsRecording(true);
+      setJarvisState('listening');
+    } catch (err) {
+      console.error("Accès au micro refusé ou indisponible", err);
+      setIsRecording(false);
       setJarvisState('idle');
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+    }
+  };
+
+  const toggleMic = () => {
+    if (isRecording) {
+      stopRecording();
     } else {
-      if (recognitionRef.current) {
-        try {
-          transcriptBufferRef.current = '';
-          recognitionRef.current.start();
-        } catch (e) {}
-      }
+      startRecording();
     }
   };
 
   // --------------------------------------------------------------------------
-  // Rendu UI
+  // Configuration UI
   // --------------------------------------------------------------------------
   const saveBackendUrl = (url) => {
     setBackendUrl(url);
@@ -286,10 +255,10 @@ export default function JarvisInterface() {
 
       <div style={styles.inputbar}>
         <button
-          style={{ ...styles.micBtn, ...(jarvisState === 'listening' ? styles.micBtnListening : {}) }}
+          style={{ ...styles.micBtn, ...(isRecording ? styles.micBtnListening : {}) }}
           onClick={toggleMic}
         >
-          🎙
+          {isRecording ? '🛑' : '🎙'}
         </button>
         <input
           style={styles.textField}
@@ -393,8 +362,8 @@ const styles = {
     border: '1px solid #22e8ff', color: '#eafeff', fontSize: 20, cursor: 'pointer',
   },
   micBtnListening: {
-    background: 'radial-gradient(circle at 35% 30%, rgba(255,176,46,.4), rgba(42,24,9,.9))',
-    borderColor: '#ffb02e',
+    background: 'radial-gradient(circle at 35% 30%, rgba(255,77,94,.4), rgba(42,9,9,.9))',
+    borderColor: '#ff4d5e',
   },
   textField: {
     flex: 1, background: 'rgba(9,24,42,.55)', border: '1px solid rgba(110,220,255,.22)',
