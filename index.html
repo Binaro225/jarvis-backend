@@ -18,12 +18,11 @@
     }
   </style>
 
-  <!-- CDNs React, ReactDOM, Three.js et Babel -->
+  <!-- CDNs React, Three.js, Babel et Tailwind -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body>
@@ -45,9 +44,8 @@
         renderer.setSize(window.innerWidth, window.innerHeight);
         mount.appendChild(renderer.domElement);
 
-        // Particules 3D
         const geometry = new THREE.BufferGeometry();
-        const count = 2000;
+        const count = 2500;
         const positions = new Float32Array(count * 3);
 
         for (let i = 0; i < count * 3; i++) {
@@ -89,35 +87,146 @@
       return <div ref={mountRef} className="absolute inset-0 z-0" />;
     }
 
-    // --- INTERFACE JARVIS ---
+    // --- INTERFACING & LOGIQUE APPLICATION ---
     function JarvisApp() {
+      const [input, setInput] = useState("");
+      const [messages, setMessages] = useState([]);
+      const [isListening, setIsListening] = useState(false);
+      const [loading, setLoading] = useState(false);
+
+      // Gestion de la reconnaissance vocale
+      const startVoiceRecognition = () => {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+          alert("La reconnaissance vocale n'est pas supportée sur ce navigateur.");
+          return;
+        }
+
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'fr-FR';
+        recognition.interimResults = false;
+
+        recognition.onstart = () => setIsListening(true);
+        recognition.onend = () => setIsListening(false);
+        recognition.onerror = () => setIsListening(false);
+
+        recognition.onresult = (event) => {
+          const transcript = event.results[0][0].transcript;
+          setInput(transcript);
+          sendMessage(transcript);
+        };
+
+        recognition.start();
+      };
+
+      // Envoi du message au backend FastAPI
+      const sendMessage = async (textToSend) => {
+        const query = textToSend || input;
+        if (!query.trim() || loading) return;
+
+        const userMsg = { sender: "user", text: query };
+        setMessages((prev) => [...prev, userMsg]);
+        setInput("");
+        setLoading(true);
+
+        try {
+          const response = await fetch("/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message: query }),
+          });
+
+          if (!response.ok) {
+            // Si la route /chat n'existe pas, fallback de test
+            throw new Error("Route API non trouvée");
+          }
+
+          const data = await response.json();
+          const botMsg = { sender: "jarvis", text: data.response || data.reply || "Commande exécutée." };
+          setMessages((prev) => [...prev, botMsg]);
+        } catch (error) {
+          // Message d'attente si la route backend /chat n'est pas configurée
+          setMessages((prev) => [
+            ...prev,
+            { sender: "jarvis", text: "Serveur connecté. (Ajuste la route API /chat dans main.py pour l'IA)" }
+          ]);
+        } finally {
+          setLoading(false);
+        }
+      };
+
       return (
-        <div className="relative w-full h-screen text-cyan-400 flex flex-col items-center justify-between p-6 z-10 select-none">
+        <div className="relative w-full h-screen text-cyan-400 flex flex-col justify-between p-4 z-10 select-none">
           <GalaxyCanvas />
           
-          <header className="z-10 text-center mt-4">
-            <h1 className="text-3xl font-bold tracking-widest text-cyan-300 drop-shadow-[0_0_10px_rgba(0,240,255,0.8)]">
+          {/* Header */}
+          <header className="z-10 text-center mt-2">
+            <h1 className="text-2xl font-bold tracking-widest text-cyan-300 drop-shadow-[0_0_10px_rgba(0,240,255,0.8)]">
               J.A.R.V.I.S.
             </h1>
-            <p className="text-xs text-cyan-500 uppercase tracking-wider mt-1">Système Actif</p>
+            <p className="text-[10px] text-cyan-500 uppercase tracking-wider">
+              {isListening ? "🎙️ Écoute en cours..." : loading ? "⚡ Traitement..." : "● En ligne"}
+            </p>
           </header>
 
-          <main className="z-10 flex flex-col items-center justify-center my-auto">
-            <div className="w-32 h-32 rounded-full border-2 border-cyan-500/40 flex items-center justify-center animate-pulse shadow-[0_0_30px_rgba(0,240,255,0.3)]">
-              <div className="w-24 h-24 rounded-full border border-cyan-300/80 flex items-center justify-center">
-                <div className="w-12 h-12 rounded-full bg-cyan-400 shadow-[0_0_20px_#00f0ff]"></div>
+          {/* Zone centrale : Rendu 3D ou Historique des messages */}
+          <main className="z-10 flex-1 overflow-y-auto my-4 max-w-lg mx-auto w-full px-2 space-y-3 flex flex-col justify-end">
+            {messages.length === 0 ? (
+              <div className="my-auto flex flex-col items-center justify-center">
+                <div className={`w-28 h-28 rounded-full border-2 border-cyan-500/40 flex items-center justify-center ${isListening ? "animate-ping" : "animate-pulse"} shadow-[0_0_30px_rgba(0,240,255,0.3)]`}>
+                  <div className="w-20 h-20 rounded-full border border-cyan-300/80 flex items-center justify-center">
+                    <div className="w-10 h-10 rounded-full bg-cyan-400 shadow-[0_0_20px_#00f0ff]"></div>
+                  </div>
+                </div>
               </div>
-            </div>
+            ) : (
+              messages.map((msg, idx) => (
+                <div 
+                  key={idx} 
+                  className={`max-w-[80%] p-3 rounded-xl text-sm ${
+                    msg.sender === "user" 
+                      ? "ml-auto bg-cyan-950/60 border border-cyan-500/40 text-cyan-100" 
+                      : "mr-auto bg-black/60 border border-cyan-400/30 text-cyan-300 shadow-[0_0_10px_rgba(0,240,255,0.15)]"
+                  }`}
+                >
+                  {msg.text}
+                </div>
+              ))
+            )}
           </main>
 
-          <footer className="z-10 w-full max-w-md bg-black/40 backdrop-blur-md border border-cyan-500/30 rounded-2xl p-3 flex items-center gap-2">
+          {/* Footer : Barre d'envoi et bouton vocal */}
+          <footer className="z-10 w-full max-w-lg mx-auto bg-black/60 backdrop-blur-md border border-cyan-500/30 rounded-2xl p-2 flex items-center gap-2">
+            {/* Bouton Vocal */}
+            <button 
+              onClick={startVoiceRecognition}
+              className={`p-2.5 rounded-xl border text-sm transition-all ${
+                isListening 
+                  ? "bg-red-500/30 border-red-400 text-red-300 animate-pulse" 
+                  : "bg-cyan-950/40 border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/20"
+              }`}
+              title="Commande vocale"
+            >
+              🎤
+            </button>
+
+            {/* Input texte */}
             <input 
               type="text" 
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && sendMessage()}
               placeholder="Commande système..." 
-              className="w-full bg-transparent text-cyan-100 placeholder-cyan-600 outline-none px-3 py-1"
+              className="w-full bg-transparent text-cyan-100 placeholder-cyan-600 outline-none px-2 text-sm"
             />
-            <button className="bg-cyan-500/20 hover:bg-cyan-500/40 border border-cyan-400/50 text-cyan-300 px-4 py-2 rounded-xl text-sm font-semibold">
-              Envoyer
+
+            {/* Bouton Envoyer */}
+            <button 
+              onClick={() => sendMessage()}
+              disabled={loading}
+              className="bg-cyan-500/20 hover:bg-cyan-500/40 border border-cyan-400/50 text-cyan-300 px-3 py-2 rounded-xl text-sm font-semibold transition-all active:scale-95"
+            >
+              {loading ? "..." : "Envoyer"}
             </button>
           </footer>
         </div>
