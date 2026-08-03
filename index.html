@@ -10,7 +10,6 @@
       margin: 0; padding: 0; width: 100%; height: 100%; height: 100dvh;
       background: #02060c; overflow: hidden; font-family: system-ui, -apple-system, sans-serif;
     }
-    /* Scrollbar personnalisée cyan */
     .custom-scroll::-webkit-scrollbar { width: 4px; }
     .custom-scroll::-webkit-scrollbar-track { background: rgba(0,240,255,0.05); }
     .custom-scroll::-webkit-scrollbar-thumb { background: rgba(0,240,255,0.3); border-radius: 4px; }
@@ -27,11 +26,13 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
-    function GalaxyCanvas({ nodes }) {
+    function GalaxyCanvas({ nodes = [] }) {
       const mountRef = useRef(null);
 
       useEffect(() => {
         const mount = mountRef.current;
+        if (!mount) return;
+
         const scene = new THREE.Scene();
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
         const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -39,25 +40,54 @@
         renderer.setSize(window.innerWidth, window.innerHeight);
         mount.appendChild(renderer.domElement);
 
-        const count = nodes && nodes.length > 0 ? nodes.length : 150;
-        const geometry = new THREE.BufferGeometry();
-        const positions = new Float32Array(count * 3);
+        const group = new THREE.Group();
+        scene.add(group);
 
-        for (let i = 0; i < count * 3; i++) {
-          positions[i] = (Math.random() - 0.5) * 12;
+        const safeNodes = Array.isArray(nodes) && nodes.length > 0 ? nodes : [];
+
+        if (safeNodes.length === 0) {
+          // Affichage par défaut si la connexion Drive n'est pas encore faite
+          const geometry = new THREE.BufferGeometry();
+          const count = 150;
+          const positions = new Float32Array(count * 3);
+          for (let i = 0; i < count * 3; i++) {
+            positions[i] = (Math.random() - 0.5) * 12;
+          }
+          geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+          const material = new THREE.PointsMaterial({ size: 0.04, color: 0x00f0ff });
+          group.add(new THREE.Points(geometry, material));
+        } else {
+          // Génération des planètes et étoiles basée sur les fichiers Google Drive
+          safeNodes.forEach((node, i) => {
+            const isSheet = node.type === 'spreadsheet' || (node.name && node.name.toLowerCase().includes('sheet'));
+            
+            // Les Google Sheets deviennent des planètes (sphères), les autres docs des étoiles
+            const geometry = isSheet 
+              ? new THREE.SphereGeometry(0.18, 16, 16) 
+              : new THREE.SphereGeometry(0.08, 8, 8);
+
+            const color = isSheet ? 0x10b981 : 0x00f0ff; // Vert pour Sheets, Cyan pour les autres
+            const material = new THREE.MeshBasicMaterial({ color, wireframe: isSheet });
+
+            const mesh = new THREE.Mesh(geometry, material);
+
+            // Disposition en orbite autour du centre
+            const angle = (i / safeNodes.length) * Math.PI * 2;
+            const radius = 2.5 + (i % 3) * 0.8;
+            mesh.position.x = Math.cos(angle) * radius;
+            mesh.position.y = (Math.random() - 0.5) * 2;
+            mesh.position.z = Math.sin(angle) * radius;
+
+            group.add(mesh);
+          });
         }
 
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        const material = new THREE.PointsMaterial({ size: 0.04, color: 0x00f0ff });
-        const points = new THREE.Points(geometry, material);
-        scene.add(points);
-
-        camera.position.z = 5;
+        camera.position.z = 6;
 
         let animationFrameId;
         const animate = () => {
           animationFrameId = requestAnimationFrame(animate);
-          points.rotation.y += 0.0015;
+          group.rotation.y += 0.002;
           renderer.render(scene, camera);
         };
         animate();
@@ -92,10 +122,11 @@
       const isProcessingRef = useRef(false);
 
       useEffect(() => {
-        // Chargement des éléments Google Drive depuis le Backend
         fetch('/api/galaxy')
           .then(res => res.json())
-          .then(data => setGalaxyNodes(data.nodes || []))
+          .then(data => {
+            if (data && data.nodes) setGalaxyNodes(data.nodes);
+          })
           .catch(() => {});
       }, []);
 
@@ -165,7 +196,7 @@
           rec.onstart = () => setIsListening(true);
           rec.onresult = (e) => {
             setIsListening(false);
-            if (e.results[0]) sendMessage(e.results[0][0].transcript);
+            if (e.results && e.results[0]) sendMessage(e.results[0][0].transcript);
           };
           rec.onerror = () => setIsListening(false);
           rec.onend = () => setIsListening(false);
@@ -187,7 +218,6 @@
             </p>
           </header>
 
-          <!-- Zone de texte avec défilement scrollbar fixe -->
           <main className="z-10 flex-1 flex flex-col items-center justify-center my-2 px-2 overflow-hidden">
             <div className={`w-20 h-20 flex-shrink-0 rounded-full border border-cyan-500/40 flex items-center justify-center mb-3 transition-all ${
               isSpeaking ? 'scale-110 shadow-[0_0_30px_rgba(0,240,255,0.8)]' : ''
