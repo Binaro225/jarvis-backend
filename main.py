@@ -4,11 +4,20 @@ Fournisseurs supportes : Gemini, Groq, Mistral, OpenRouter
 Outils (tools) : connecteur Google Apps Script (Drive / Docs / Sheets / Gmail / Calendar)
 Recherche web : Tavily (temps reel)
 Deploiement : Render (voir Procfile) - sert aussi le frontend (index.html) directement.
+
+MEMOIRE (ajout) :
+- Court terme : historique de conversation conserve cote serveur, par session_id, dans
+  SESSION_HISTORIES (in-memory). Fusionne avec l'historique eventuellement envoye par le
+  frontend, pour ne jamais perdre le fil meme si le frontend ne renvoie rien.
+- Long terme : fichier local memory.json a la racine du projet, injecte dans le system
+  prompt a chaque requete /chat, et mis a jour automatiquement via le court-circuit
+  "Retiens que ..." (en plus de l'ecriture existante vers le connecteur Drive).
 """
 
 import os
 import json
 import httpx
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -95,6 +104,111 @@ async def ensure_current_brain_model() -> str:
         current_brain["model"] = await model_discovery.get_default_model_for_provider(current_brain["provider"])
     return current_brain["model"]
 
+
+# ----------------------------------------------------------------------------
+# MEMOIRE COURT TERME : historique de conversation par session (cote serveur)
+# ----------------------------------------------------------------------------
+# Cle = session_id (fourni par le frontend, ou "default" si absent).
+# Valeur = liste de dicts {"role": "user"|"assistant", "content": str}, la plus recente en fin.
+# Un verrou simple protege les acces concurrents (FastAPI peut traiter plusieurs requetes
+# en parallele sur des sessions differentes, voire la meme session en cas de double-clic).
+SESSION_HISTORIES: Dict[str, List[Dict[str, str]]] = {}
+SESSION_HISTORY_LOCK = threading.Lock()
+
+# Nombre max de MESSAGES (pas d'echanges) conserves par session. 20 messages = ~10 echanges
+# user/assistant, comme demande.
+MAX_SESSION_MESSAGES = 20
+
+
+def get_session_history(session_id: str) -> List[Dict[str, str]]:
+    with SESSION_HISTORY_LOCK:
+        return list(SESSION_HISTORIES.get(session_id, []))
+
+
+def append_session_turn(session_id: str, user_content: str, assistant_content: str) -> None:
+    """Ajoute l'echange (question utilisateur + reponse assistant) a l'historique de la
+    session, puis tronque pour ne garder que les MAX_SESSION_MESSAGES derniers messages."""
+    with SESSION_HISTORY_LOCK:
+        history = SESSION_HISTORIES.setdefault(session_id, [])
+        history.append({"role": "user", "content": user_content})
+        history.append({"role": "assistant", "content": assistant_content})
+        if len(history) > MAX_SESSION_MESSAGES:
+            del history[: len(history) - MAX_SESSION_MESSAGES]
+
+
+def clear_session_history(session_id: str) -> None:
+    with SESSION_HISTORY_LOCK:
+        SESSION_HISTORIES.pop(session_id, None)
+
+
+def merge_history(
+    session_id: str, client_history: Optional[List["HistoryMessage"]]
+) -> List["HistoryMessage"]:
+    """Determine l'historique effectif a envoyer au LLM pour cette requete.
+
+    Priorite a l'historique conserve cote serveur (source de verite, jamais perdu). Si la
+    session est vide cote serveur (premier appel apres redemarrage, par ex.) mais que le
+    frontend a transmis un historique, on l'utilise pour amorcer la session - on ne perd
+    ainsi jamais le fil, meme si le frontend "oublie" de renvoyer l'historique par la suite.
+    """
+    server_history = get_session_history(session_id)
+    if server_history:
+        return [HistoryMessage(role=m["role"], content=m["content"]) for m in server_history]
+    if client_history:
+        return client_history
+    return []
+
+
+# ----------------------------------------------------------------------------
+# MEMOIRE LONG TERME : fichier local memory.json (faits persistants sur l'utilisateur)
+# ----------------------------------------------------------------------------
+LONG_TERM_MEMORY_FILE = BASE_DIR / "memory.json"
+LONG_TERM_MEMORY_LOCK = threading.Lock()
+
+
+def _read_memory_file() -> List[Dict[str, str]]:
+    if not LONG_TERM_MEMORY_FILE.exists():
+        return []
+    try:
+        with open(LONG_TERM_MEMORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _write_memory_file(facts: List[Dict[str, str]]) -> None:
+    with open(LONG_TERM_MEMORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(facts, f, ensure_ascii=False, indent=2)
+
+
+def load_long_term_memory_text() -> str:
+    """Renvoie la memoire long terme formatee en texte, prete a etre injectee dans le system
+    prompt. Chaine vide si aucun fait n'est encore memorise (fichier absent ou vide)."""
+    with LONG_TERM_MEMORY_LOCK:
+        facts = _read_memory_file()
+    if not facts:
+        return ""
+    lines = [f"- {f.get('content', '')}" for f in facts if f.get("content")]
+    if not lines:
+        return ""
+    return "Faits memorises sur l'utilisateur (a prendre en compte, sans les mentionner explicitement) :\n" + "\n".join(lines)
+
+
+def append_long_term_memory(content: str) -> Dict[str, Any]:
+    """Ajoute un fait a la memoire long terme locale (memory.json). Cree le fichier s'il
+    n'existe pas encore. Renvoie le fait ajoute."""
+    content = content.strip()
+    if not content:
+        return {"error": "Contenu vide, rien a memoriser."}
+    with LONG_TERM_MEMORY_LOCK:
+        facts = _read_memory_file()
+        entry = {"content": content, "timestamp": datetime.now().isoformat()}
+        facts.append(entry)
+        _write_memory_file(facts)
+    return entry
+
+
 # ----------------------------------------------------------------------------
 # FastAPI app
 # ----------------------------------------------------------------------------
@@ -106,7 +220,7 @@ app = FastAPI(
         "OpenRouter) avec function calling vers l'ecosysteme Google (Drive/Docs/Sheets/"
         "Gmail/Calendar) et recherche web temps reel (Tavily)."
     ),
-    version="3.0.0",
+    version="3.1.0",
 )
 
 app.add_middleware(
@@ -138,10 +252,12 @@ class ChatRequest(BaseModel):
     prompt: Optional[str] = None
     message: Optional[str] = None  # alias tolere, mappe automatiquement vers 'prompt'
 
+    session_id: Optional[str] = "default"  # identifiant de session pour l'historique cote serveur
+
     provider: Optional[str] = None   # override ponctuel, sans changer l'etat global
     model: Optional[str] = None      # override ponctuel du modele
     system: Optional[str] = None     # instructions ponctuelles additionnelles
-    history: Optional[List[HistoryMessage]] = []  # historique de conversation (frontend -> backend)
+    history: Optional[List[HistoryMessage]] = []  # historique envoye par le frontend (optionnel desormais)
     image_base64: Optional[str] = None  # capture d'ecran ou image jointe (vision), sans prefixe data:
     temperature: Optional[float] = 0.7
     max_tokens: Optional[int] = 1024
@@ -167,6 +283,7 @@ class ChatResponse(BaseModel):
     provider: str
     model: str
     response: str
+    session_id: str = "default"
     tools_used: List[ToolCallLog] = []
     source_node_ids: List[str] = []  # IDs de fichiers Drive touches par les outils, pour illuminer la Galaxie 3D
     active_categories: List[str] = []  # categories de planetes a mettre en focus (drive/docs/sheets/gmail/prediction/search)
@@ -239,6 +356,10 @@ class GalaxyLink(BaseModel):
 class GalaxyResponse(BaseModel):
     nodes: List[GalaxyNode]
     links: List[GalaxyLink]
+
+
+class MemoryFactRequest(BaseModel):
+    content: str
 
 
 # ----------------------------------------------------------------------------
@@ -688,6 +809,32 @@ async def api_models_select(req: SwitchBrainRequest):
     return await _perform_brain_switch(req.provider, req.model)
 
 
+# ----------------------------------------------------------------------------
+# Endpoints de gestion de la memoire (nouveaux)
+# ----------------------------------------------------------------------------
+
+@app.get("/api/memory")
+async def api_get_memory():
+    """Renvoie les faits actuellement memorises en long terme (contenu de memory.json)."""
+    with LONG_TERM_MEMORY_LOCK:
+        facts = _read_memory_file()
+    return {"facts": facts}
+
+
+@app.post("/api/memory")
+async def api_add_memory(req: MemoryFactRequest):
+    """Ajoute manuellement un fait a la memoire long terme locale."""
+    entry = append_long_term_memory(req.content)
+    return {"added": entry}
+
+
+@app.delete("/api/session/{session_id}")
+async def api_clear_session(session_id: str):
+    """Efface l'historique court terme d'une session (pour repartir sur une conversation vierge)."""
+    clear_session_history(session_id)
+    return {"message": f"Historique de la session '{session_id}' efface."}
+
+
 def extract_source_node_ids(tools_used: List[ToolCallLog]) -> List[str]:
     """Parcourt les resultats d'outils pour en extraire les IDs de fichiers Drive touches,
     afin que le frontend puisse illuminer les noeuds correspondants dans la Galaxie 3D."""
@@ -725,8 +872,12 @@ async def chat(req: ChatRequest):
     """
     Envoie un prompt au LLM actif (ou a un fournisseur/modele precise ponctuellement), avec
     la personnalite JARVIS toujours appliquee, enrichie a chaque requete de la date/heure
-    courante et du cerveau actif. L'historique de conversation transmis par le frontend est
-    reinjecte pour que JARVIS ne perde jamais le fil.
+    courante, du cerveau actif, ET de la memoire long terme locale (memory.json).
+
+    L'historique de conversation est desormais garanti cote SERVEUR : chaque session
+    (identifiee par session_id) conserve ses N derniers messages dans SESSION_HISTORIES,
+    independamment de ce que renvoie (ou non) le frontend. Le frontend peut continuer a
+    envoyer 'history', il sert seulement a amorcer une session vide.
 
     Accepte indifferemment {"prompt": "..."} ou {"message": "..."} en entree (voir ChatRequest).
 
@@ -735,7 +886,8 @@ async def chat(req: ChatRequest):
     vision suivant en cas d'echec du premier - liste decouverte dynamiquement, aucun modele fige.
 
     Deux court-circuits rapides, sans passer par le LLM :
-      - "Rappelle-toi que...", "Note que...", "Souviens-toi que..." -> memorisation immediate.
+      - "Rappelle-toi que...", "Note que...", "Souviens-toi que..." -> memorisation immediate,
+        a la fois dans le connecteur Drive (remember_note) ET dans memory.json (local).
       - "Passe sur Groq", "Quel cerveau utilises-tu ?" -> changement/etat du cerveau immediat.
 
     Pour toute autre demande (ex: "combien de mails Gmail aujourd'hui ?"), le prompt est envoye
@@ -746,6 +898,8 @@ async def chat(req: ChatRequest):
     Toute la logique d'appel LLM est protegee par un try/except global : le frontend ne
     recoit jamais une erreur HTTP 500/404 brute, mais toujours une reponse JSON exploitable.
     """
+    session_id = req.session_id or "default"
+
     provider = normalize_provider(req.provider) or current_brain["provider"]
     if provider not in PROVIDERS:
         raise HTTPException(status_code=400, detail=f"Fournisseur inconnu: {provider}")
@@ -758,7 +912,7 @@ async def chat(req: ChatRequest):
         else:
             model = await model_discovery.get_default_model_for_provider(provider)
     except ValueError as e:
-        return ChatResponse(provider=provider, model="", response=f"Petit contretemps technique : {e}", tools_used=[])
+        return ChatResponse(provider=provider, model="", response=f"Petit contretemps technique : {e}", tools_used=[], session_id=session_id)
 
     use_tools_flag = req.use_tools if req.use_tools is not None else True
 
@@ -769,14 +923,20 @@ async def chat(req: ChatRequest):
         memory_content = total_recall.extract_memory_content(req.prompt)
         if memory_content:
             result = await tools.execute_tool("remember_note", {"content": memory_content})
+            # En plus du connecteur Drive, on ecrit systematiquement dans la memoire locale
+            # (memory.json), qui sert de source fiable et rapide pour l'injection au system prompt.
+            append_long_term_memory(memory_content)
             if isinstance(result, dict) and result.get("error"):
                 response_text = persona.get_memory_failure_line(result["error"])
             else:
                 response_text = persona.get_memory_confirmation()
+            cleaned = persona.clean_text_for_voice(response_text)
+            append_session_turn(session_id, req.prompt, cleaned)
             return ChatResponse(
                 provider=provider,
                 model=model,
-                response=persona.clean_text_for_voice(response_text),
+                response=cleaned,
+                session_id=session_id,
                 tools_used=[ToolCallLog(name="remember_note", arguments={"content": memory_content}, result=result)],
             )
 
@@ -790,20 +950,45 @@ async def chat(req: ChatRequest):
                 current_brain["provider"] = switch_target
                 current_brain["model"] = await model_discovery.get_default_model_for_provider(switch_target)
             except ValueError as e:
-                return ChatResponse(provider=provider, model=model, response=f"Petit contretemps technique : {e}", tools_used=[])
+                return ChatResponse(provider=provider, model=model, response=f"Petit contretemps technique : {e}", tools_used=[], session_id=session_id)
+            cleaned = persona.clean_text_for_voice(persona.get_brain_switch_confirmation(switch_target))
+            append_session_turn(session_id, req.prompt, cleaned)
             return ChatResponse(
                 provider=switch_target,
                 model=current_brain["model"],
-                response=persona.clean_text_for_voice(persona.get_brain_switch_confirmation(switch_target)),
+                response=cleaned,
+                session_id=session_id,
                 tools_used=[],
             )
         if persona.detect_brain_query(req.prompt):
+            cleaned = persona.clean_text_for_voice(persona.get_brain_query_answer(current_brain["provider"]))
+            append_session_turn(session_id, req.prompt, cleaned)
             return ChatResponse(
                 provider=provider,
                 model=model,
-                response=persona.clean_text_for_voice(persona.get_brain_query_answer(current_brain["provider"])),
+                response=cleaned,
+                session_id=session_id,
                 tools_used=[],
             )
+
+    # ------------------------------------------------------------------------
+    # Construction du system prompt : personnalite + date/heure + cerveau actif +
+    # memoire long terme locale (memory.json), injectee discretement.
+    # ------------------------------------------------------------------------
+    long_term_memory_text = load_long_term_memory_text()
+    extra_instructions = req.system or ""
+    if long_term_memory_text:
+        extra_instructions = (extra_instructions + "\n\n" + long_term_memory_text).strip()
+
+    effective_system = persona.build_effective_system_prompt(
+        current_datetime=current_datetime_str(),
+        current_provider=current_brain["provider"],
+        extra_instructions=extra_instructions or None,
+    )
+
+    # Historique effectif : priorite a la memoire de session cote serveur, amorcee au besoin
+    # par l'historique envoye par le frontend (voir merge_history).
+    effective_history = merge_history(session_id, req.history)
 
     # ------------------------------------------------------------------------
     # Appel LLM normal (ou vision avec fallback automatique), avec function calling reel.
@@ -811,19 +996,13 @@ async def chat(req: ChatRequest):
     # via dispatch_to_provider -> run_gemini_chat / run_openai_style_chat -> tools.execute_tool.
     # Le tout est protege globalement pour ne jamais renvoyer une erreur brute au frontend.
     # ------------------------------------------------------------------------
-    effective_system = persona.build_effective_system_prompt(
-        current_datetime=current_datetime_str(),
-        current_provider=current_brain["provider"],
-        extra_instructions=req.system,
-    )
-
     try:
         if req.image_base64:
             answer, tools_used, used_provider, used_model = await vision_chat_with_fallback(
                 prompt=req.prompt,
                 image_base64=req.image_base64,
                 system=effective_system,
-                history=req.history,
+                history=effective_history,
                 temperature=req.temperature or 0.7,
                 max_tokens=req.max_tokens or 1024,
                 use_tools=use_tools_flag,
@@ -837,30 +1016,41 @@ async def chat(req: ChatRequest):
                 model=model,
                 prompt=req.prompt,
                 system=effective_system,
-                history=req.history,
+                history=effective_history,
                 temperature=req.temperature or 0.7,
                 max_tokens=req.max_tokens or 1024,
                 use_tools=use_tools_flag,
             )
     except HTTPException as e:
+        error_text = f"Petit contretemps technique : {e.detail}"
         return ChatResponse(
             provider=provider,
             model=model,
-            response=f"Petit contretemps technique : {e.detail}",
+            response=error_text,
+            session_id=session_id,
             tools_used=[],
         )
     except Exception as e:  # filet de securite ultime : jamais de 500 brut cote frontend
+        error_text = f"Une erreur inattendue est survenue : {e}"
         return ChatResponse(
             provider=provider,
             model=model,
-            response=f"Une erreur inattendue est survenue : {e}",
+            response=error_text,
+            session_id=session_id,
             tools_used=[],
         )
+
+    final_answer = persona.clean_text_for_voice(answer)
+
+    # Memorisation de l'echange cote serveur, pour que le tour suivant garde le fil meme
+    # sans historique envoye par le frontend.
+    append_session_turn(session_id, req.prompt, final_answer)
 
     return ChatResponse(
         provider=provider,
         model=model,
-        response=persona.clean_text_for_voice(answer),
+        response=final_answer,
+        session_id=session_id,
         tools_used=tools_used,
         source_node_ids=extract_source_node_ids(tools_used),
         active_categories=extract_active_categories(tools_used),
