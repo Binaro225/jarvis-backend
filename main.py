@@ -840,3 +840,18 @@ if __name__ == "__main__":
 
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+# --- CODE À AJOUTER À LA FIN DE MAIN.PY ---
+from fastapi.responses import FileResponse, Response
+import os
+
+@app.get("/{file_name:path}")
+async def serve_static_files(file_name: str):
+    if file_name == "" or file_name == "/":
+        return FileResponse("index.html")
+    
+    if os.path.exists(file_name):
+        if file_name.endswith((".jsx", ".js")):
+            return FileResponse(file_name, media_type="text/javascript")
+        return FileResponse(file_name)
+    
+    return Response(status_code=404)
