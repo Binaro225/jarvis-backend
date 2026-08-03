@@ -1,13 +1,10 @@
 /**
- * GalaxyScene.jsx
+ * galaxyscene.jsx
  * -----------------
  * Univers 3D "constellation" de JARVIS : chaque document/outil Google est une planete,
  * coloree par categorie, reliee a ses voisins par des filaments lumineux. La camera
  * zoome automatiquement sur la planete concernee quand JARVIS utilise un outil, sans
  * jamais afficher de log texte.
- *
- * INSTALLATION (dans ton projet React) :
- *   npm install three @react-three/fiber @react-three/drei
  *
  * PROPS
  *   nodes             : [{ id, name, mime_type, url }]        -> depuis GET /api/galaxy
@@ -15,12 +12,6 @@
  *   sourceNodeIds      : string[]  -> ChatResponse.source_node_ids (fichiers precis touches)
  *   activeCategories   : string[]  -> ChatResponse.active_categories (drive/docs/sheets/gmail/prediction/search)
  *   jarvisState        : 'idle' | 'listening' | 'thinking' | 'speaking'
- *
- * USAGE
- *   <Canvas camera={{ position: [0, 6, 22], fov: 55 }}>
- *     <GalaxyScene nodes={nodes} links={links} sourceNodeIds={sourceNodeIds}
- *                  activeCategories={activeCategories} jarvisState={jarvisState} />
- *   </Canvas>
  */
 
 import React, { useRef, useMemo, useEffect, useState } from 'react';
