@@ -5,13 +5,15 @@ Outils (tools) : connecteur Google Apps Script (Drive / Docs / Sheets / Gmail / 
 Recherche web : Tavily (temps reel)
 Deploiement : Render (voir Procfile) - sert aussi le frontend (index.html) directement.
 
-MEMOIRE (ajout) :
+MEMOIRE :
 - Court terme : historique de conversation conserve cote serveur, par session_id, dans
-  SESSION_HISTORIES (in-memory). Fusionne avec l'historique eventuellement envoye par le
-  frontend, pour ne jamais perdre le fil meme si le frontend ne renvoie rien.
-- Long terme : fichier local memory.json a la racine du projet, injecte dans le system
-  prompt a chaque requete /chat, et mis a jour automatiquement via le court-circuit
-  "Retiens que ..." (en plus de l'ecriture existante vers le connecteur Drive).
+  SESSION_HISTORIES (in-memory). Conserve les SESSION_HISTORY_MAX_MESSAGES derniers messages
+  (par defaut 14, soit ~7 echanges user/assistant). Fusionne avec l'historique eventuellement
+  envoye par le frontend, pour ne jamais perdre le fil meme si le frontend ne renvoie rien.
+- Long terme : fichier local user_memory.json a la racine du projet (avec migration
+  automatique depuis l'ancien memory.json s'il existe), injecte dans le system prompt a
+  chaque requete /chat, et mis a jour automatiquement via le court-circuit "Retiens que ..."
+  (en plus de l'ecriture existante vers le connecteur Drive).
 """
 
 import os
@@ -115,9 +117,10 @@ async def ensure_current_brain_model() -> str:
 SESSION_HISTORIES: Dict[str, List[Dict[str, str]]] = {}
 SESSION_HISTORY_LOCK = threading.Lock()
 
-# Nombre max de MESSAGES (pas d'echanges) conserves par session. 20 messages = ~10 echanges
-# user/assistant, comme demande.
-MAX_SESSION_MESSAGES = 20
+# Nombre max de MESSAGES (pas d'echanges) conserves par session. Par defaut 14 messages
+# = ~7 echanges user/assistant, conformement au besoin de "10 a 15 derniers messages".
+# Configurable via la variable d'environnement SESSION_HISTORY_MAX_MESSAGES si besoin.
+MAX_SESSION_MESSAGES = int(os.getenv("SESSION_HISTORY_MAX_MESSAGES", "14"))
 
 
 def get_session_history(session_id: str) -> List[Dict[str, str]]:
@@ -160,21 +163,38 @@ def merge_history(
 
 
 # ----------------------------------------------------------------------------
-# MEMOIRE LONG TERME : fichier local memory.json (faits persistants sur l'utilisateur)
+# MEMOIRE LONG TERME : fichier local user_memory.json (faits persistants sur l'utilisateur)
 # ----------------------------------------------------------------------------
-LONG_TERM_MEMORY_FILE = BASE_DIR / "memory.json"
+# Renomme depuis memory.json -> user_memory.json pour refleter son role de "profil
+# utilisateur". Migration automatique et transparente de l'ancien fichier s'il existe deja,
+# pour ne perdre aucun fait deja memorise lors du passage a cette version.
+LONG_TERM_MEMORY_FILE = BASE_DIR / "user_memory.json"
+_LEGACY_MEMORY_FILE = BASE_DIR / "memory.json"
 LONG_TERM_MEMORY_LOCK = threading.Lock()
 
 
 def _read_memory_file() -> List[Dict[str, str]]:
-    if not LONG_TERM_MEMORY_FILE.exists():
-        return []
-    try:
-        with open(LONG_TERM_MEMORY_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, OSError):
-        return []
+    if LONG_TERM_MEMORY_FILE.exists():
+        try:
+            with open(LONG_TERM_MEMORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+        except (json.JSONDecodeError, OSError):
+            return []
+
+    # Fichier introuvable : on tente une migration depuis l'ancien memory.json, une seule
+    # fois, pour ne jamais perdre les faits deja memorises par l'utilisateur.
+    if _LEGACY_MEMORY_FILE.exists():
+        try:
+            with open(_LEGACY_MEMORY_FILE, "r", encoding="utf-8") as f:
+                legacy_data = json.load(f)
+            if isinstance(legacy_data, list):
+                _write_memory_file(legacy_data)
+                return legacy_data
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return []
 
 
 def _write_memory_file(facts: List[Dict[str, str]]) -> None:
@@ -196,7 +216,7 @@ def load_long_term_memory_text() -> str:
 
 
 def append_long_term_memory(content: str) -> Dict[str, Any]:
-    """Ajoute un fait a la memoire long terme locale (memory.json). Cree le fichier s'il
+    """Ajoute un fait a la memoire long terme locale (user_memory.json). Cree le fichier s'il
     n'existe pas encore. Renvoie le fait ajoute."""
     content = content.strip()
     if not content:
@@ -220,7 +240,7 @@ app = FastAPI(
         "OpenRouter) avec function calling vers l'ecosysteme Google (Drive/Docs/Sheets/"
         "Gmail/Calendar) et recherche web temps reel (Tavily)."
     ),
-    version="3.1.0",
+    version="3.2.0",
 )
 
 app.add_middleware(
@@ -314,6 +334,8 @@ TOOL_CATEGORY: Dict[str, str] = {
     "list_calendar_events": "gmail",
     "create_calendar_event": "gmail",
     "predict_football_match": "prediction",
+    "save_football_prediction": "prediction",
+    "execute_apps_script_action": "prediction",
     "web_search": "search",
 }
 
@@ -344,18 +366,11 @@ class ModelInfo(BaseModel):
 class GalaxyNode(BaseModel):
     id: str
     name: str
-    mime_type: str = ""
-    url: str = ""
-
-
-class GalaxyLink(BaseModel):
-    source: str
-    target: str
+    type: str = "file"
 
 
 class GalaxyResponse(BaseModel):
     nodes: List[GalaxyNode]
-    links: List[GalaxyLink]
 
 
 class MemoryFactRequest(BaseModel):
@@ -473,7 +488,7 @@ async def run_openai_style_chat(
             except json.JSONDecodeError:
                 fn_args = {}
 
-            result = await tools.execute_tool(fn_name, fn_args)
+            result = await execute_tool_with_local_overrides(fn_name, fn_args)
             tools_used.append(ToolCallLog(name=fn_name, arguments=fn_args, result=result))
             consecutive_errors = consecutive_errors + 1 if isinstance(result, dict) and result.get("error") else 0
 
@@ -579,7 +594,7 @@ async def run_gemini_chat(
         fn_name = fc.get("name", "")
         fn_args = fc.get("args", {}) or {}
 
-        result = await tools.execute_tool(fn_name, fn_args)
+        result = await execute_tool_with_local_overrides(fn_name, fn_args)
         tools_used.append(ToolCallLog(name=fn_name, arguments=fn_args, result=result))
         consecutive_errors = consecutive_errors + 1 if isinstance(result, dict) and result.get("error") else 0
 
@@ -599,6 +614,115 @@ async def run_gemini_chat(
 
     fallback_text = "".join(p.get("text", "") for p in last_parts) or "(Reponse tronquee apres plusieurs appels d'outils.)"
     return fallback_text, tools_used
+
+
+# ----------------------------------------------------------------------------
+# INTEGRATION GOOGLE APPS SCRIPT : fonction generique + wrapper pronostics
+# ----------------------------------------------------------------------------
+# URL du WebApp Google Apps Script deploye. GAS_ACTIONS_WEBAPP_URL est le nom generique a
+# privilegier desormais ; on retombe sur GAS_PREDICTIONS_WEBAPP_URL par compatibilite
+# ascendante si l'ancienne variable est deja definie sur ton deploiement Render.
+GAS_PREDICTIONS_WEBAPP_URL = os.getenv("GAS_PREDICTIONS_WEBAPP_URL", "URL_DE_TON_APPS_SCRIPT")
+GAS_ACTIONS_WEBAPP_URL = os.getenv("GAS_ACTIONS_WEBAPP_URL", GAS_PREDICTIONS_WEBAPP_URL)
+
+
+async def send_to_apps_script(action: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Fonction GENERIQUE de transmission vers le WebApp Google Apps Script : poste n'importe
+    quelle 'action' + payload JSON, sans avoir besoin d'un endpoint Python dedie par cas
+    d'usage. Le WebApp Apps Script route deja sur le champ 'action' (comme il le fait pour
+    'save_prediction' et pour remember_note via connector.py) ; il suffit d'ajouter un nouveau
+    'case' dans le doPost() du script pour supporter une nouvelle action (ex: 'save_revenue',
+    'update_client', etc.), sans toucher a ce backend."""
+    url = GAS_ACTIONS_WEBAPP_URL
+    if not url or url == "URL_DE_TON_APPS_SCRIPT":
+        return {
+            "error": (
+                "URL du WebApp Apps Script non configuree. Definis la variable d'environnement "
+                "GAS_ACTIONS_WEBAPP_URL (ou GAS_PREDICTIONS_WEBAPP_URL) avec l'URL /exec de ton "
+                "deploiement."
+            )
+        }
+
+    payload = {"action": action, "timestamp": datetime.now().isoformat(), **data}
+
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            r = await client.post(url, json=payload)
+        if r.status_code != 200:
+            return {"error": f"Le WebApp Apps Script a repondu avec le statut {r.status_code}: {r.text}"}
+        try:
+            return r.json()
+        except ValueError:
+            # Certains deploiements Apps Script renvoient du texte brut plutot que du JSON.
+            return {"success": True, "raw_response": r.text}
+    except httpx.HTTPError as e:
+        return {"error": f"Echec de la requete vers le WebApp Apps Script : {e}"}
+
+
+async def save_football_prediction(match_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Enregistre un pronostic de match. Simple wrapper retrocompatible autour de
+    send_to_apps_script("save_prediction", ...), conserve pour que le nom d'outil existant
+    (deja declare dans tools.py) continue de fonctionner sans modification.
+
+    match_data attendu, par exemple :
+        {
+            "equipe_domicile": "Sarmiento",
+            "equipe_exterieur": "Rivadavia",
+            "score_predit_domicile": 2,
+            "score_predit_exterieur": 1,
+            "issue": "1",              # "1" (domicile), "N" (nul), "2" (exterieur)
+            "confiance": 0.72,          # 0-1, optionnel
+            "date_match": "2026-08-10", # optionnel
+            "commentaire": "..."        # optionnel
+        }
+    """
+    return await send_to_apps_script("save_prediction", match_data)
+
+
+async def execute_tool_with_local_overrides(fn_name: str, fn_args: Dict[str, Any]) -> Any:
+    """Point d'entree unique pour l'execution des outils appeles par le LLM.
+
+    On intercepte ici les outils geres localement dans main.py avant de retomber sur le
+    dispatcher generique tools.execute_tool pour tous les autres outils
+    (Drive/Docs/Sheets/Gmail/Calendar/recherche web/etc.).
+
+    IMPORTANT : pour que le LLM sache que ces outils existent et decide de les appeler, il
+    faut declarer leur schema de function calling dans tools.py (voir TOOLS / get_openai_tools
+    / get_gemini_tools). Schema a ajouter dans tools.py pour le nouvel outil generique
+    'execute_apps_script_action' (en plus de 'save_football_prediction', deja declare) :
+
+        {
+            "name": "execute_apps_script_action",
+            "description": "Transmet une action et des donnees structurees arbitraires au "
+                            "WebApp Google Apps Script (ex: enregistrer une ecriture "
+                            "financiere, mettre a jour un client, etc.), au-dela des seuls "
+                            "pronostics de football.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "Nom de l'action a router cote Apps Script (ex: "
+                                       "'save_revenue', 'update_client').",
+                    },
+                    "data": {
+                        "type": "object",
+                        "description": "Payload JSON libre associe a cette action.",
+                    },
+                },
+                "required": ["action", "data"],
+            },
+        }
+    """
+    if fn_name == "save_football_prediction":
+        return await save_football_prediction(fn_args)
+    if fn_name == "execute_apps_script_action":
+        action = fn_args.get("action", "")
+        data = fn_args.get("data", {}) or {}
+        if not action:
+            return {"error": "Le champ 'action' est requis pour execute_apps_script_action."}
+        return await send_to_apps_script(action, data)
+    return await tools.execute_tool(fn_name, fn_args)
 
 
 # ----------------------------------------------------------------------------
@@ -711,7 +835,11 @@ async def list_providers():
         "current_brain": current_brain,
         "tools_available": [t["name"] for t in tools.TOOLS],
         "connector_configured": bool(os.getenv("GAS_WEBAPP_URL")),
+        "apps_script_actions_configured": bool(
+            GAS_ACTIONS_WEBAPP_URL and GAS_ACTIONS_WEBAPP_URL != "URL_DE_TON_APPS_SCRIPT"
+        ),
         "web_search_configured": bool(os.getenv("TAVILY_API_KEY")),
+        "gdrive_native_configured": bool(os.getenv("GDRIVE_SERVICE_ACCOUNT_FILE") or os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON")),
     }
 
 
@@ -727,38 +855,120 @@ async def api_models(refresh: bool = False):
     return grouped
 
 
-# Planetes "systeme" sans fichier Drive correspondant : toujours presentes dans la Galaxie pour
-# que la camera ait une cible meme quand JARVIS utilise Gmail, la prediction football, ou le
-# web_search (mime_type prefixe "system/" pour un code couleur dedie cote frontend).
-SYSTEM_GALAXY_NODES = [
-    GalaxyNode(id="system:gmail", name="Gmail", mime_type="system/gmail", url=""),
-    GalaxyNode(id="system:prediction", name="Predicteur Football", mime_type="system/prediction", url=""),
-    GalaxyNode(id="system:search", name="Recherche Web", mime_type="system/search", url=""),
-]
+# ----------------------------------------------------------------------------
+# Google Drive natif (google-api-python-client) pour /api/galaxy
+# ----------------------------------------------------------------------------
+# Deux modes d'authentification supportes, au choix :
+#   - GDRIVE_SERVICE_ACCOUNT_FILE : chemin vers un fichier JSON de compte de service.
+#   - GDRIVE_SERVICE_ACCOUNT_JSON : le contenu JSON du compte de service directement dans la
+#     variable d'environnement (pratique sur Render, ou on ne peut pas toujours uploader un
+#     fichier a cote du code).
+# Le compte de service doit avoir acces en lecture au Drive concerne (partage du dossier avec
+# son adresse email de type ...@...iam.gserviceaccount.com), ou utiliser un Shared Drive.
+GDRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID")  # optionnel : limite le listing a ce dossier
+
+# Correspondance mimeType Google -> "type" simplifie pour l'affichage Three.js.
+GDRIVE_MIME_TO_TYPE = {
+    "application/vnd.google-apps.spreadsheet": "spreadsheet",
+    "application/vnd.google-apps.document": "document",
+    "application/vnd.google-apps.presentation": "presentation",
+    "application/vnd.google-apps.folder": "folder",
+    "application/vnd.google-apps.form": "form",
+    "application/pdf": "pdf",
+}
+
+
+def _load_gdrive_credentials():
+    """Construit les credentials Google a partir d'un fichier ou d'une variable d'env JSON.
+    Renvoie None si aucune configuration n'est presente (l'appelant doit gerer ce cas)."""
+    from google.oauth2 import service_account
+
+    service_account_file = os.getenv("GDRIVE_SERVICE_ACCOUNT_FILE")
+    if service_account_file and Path(service_account_file).exists():
+        return service_account.Credentials.from_service_account_file(service_account_file, scopes=GDRIVE_SCOPES)
+
+    service_account_json = os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON")
+    if service_account_json:
+        info = json.loads(service_account_json)
+        return service_account.Credentials.from_service_account_info(info, scopes=GDRIVE_SCOPES)
+
+    return None
+
+
+def _mime_to_simple_type(mime_type: str) -> str:
+    return GDRIVE_MIME_TO_TYPE.get(mime_type, "file")
+
+
+def list_drive_files_native() -> List[Dict[str, str]]:
+    """Interroge directement l'API Google Drive (via google-api-python-client), SANS AUCUN
+    CACHE, a chaque appel : renvoie une liste simplifiee de fichiers {id, name, type}, prete a
+    etre transformee en noeuds pour la Galaxie 3D. Fonction synchrone (le client Google API ne
+    fournit pas d'API async native) ; appelee via run_in_threadpool depuis l'endpoint pour ne
+    pas bloquer la boucle asyncio."""
+    from googleapiclient.discovery import build
+
+    credentials = _load_gdrive_credentials()
+    if credentials is None:
+        raise RuntimeError(
+            "Aucune credential Google Drive configuree. Definissez GDRIVE_SERVICE_ACCOUNT_FILE "
+            "(chemin vers le JSON du compte de service) ou GDRIVE_SERVICE_ACCOUNT_JSON (contenu JSON)."
+        )
+
+    service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+    query_parts = ["trashed = false"]
+    if GDRIVE_FOLDER_ID:
+        query_parts.append(f"'{GDRIVE_FOLDER_ID}' in parents")
+    query = " and ".join(query_parts)
+
+    files: List[Dict[str, str]] = []
+    page_token = None
+    while True:
+        response = (
+            service.files()
+            .list(
+                q=query,
+                spaces="drive",
+                fields="nextPageToken, files(id, name, mimeType)",
+                pageToken=page_token,
+                pageSize=200,
+            )
+            .execute()
+        )
+        for f in response.get("files", []):
+            files.append(
+                {
+                    "id": f["id"],
+                    "name": f.get("name", "Sans nom"),
+                    "type": _mime_to_simple_type(f.get("mimeType", "")),
+                }
+            )
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+
+    return files
 
 
 @app.get("/api/galaxy", response_model=GalaxyResponse)
 async def api_galaxy():
-    """Construit le graphe (nodes/links) des fichiers Google Drive de l'utilisateur, augmente de
-    planetes 'systeme' fixes (Gmail, prediction football, recherche web), pour alimenter la
-    Galaxie 3D du frontend. Chaque fichier est un noeud ; chaque lien dossier -> fichier est une arete."""
-    nodes: List[GalaxyNode] = list(SYSTEM_GALAXY_NODES)
-    links: List[GalaxyLink] = []
+    """Interroge l'API Google Drive native (google-api-python-client) EN DIRECT a chaque appel
+    (pas de cache), et renvoie les fichiers accessibles au compte de service sous forme de
+    noeuds {id, name, type} pour alimenter la Galaxie 3D (Three.js) du frontend.
+
+    En cas d'absence de configuration ou d'erreur d'API, renvoie une liste vide plutot que de
+    faire echouer toute la requete (la Galaxie doit pouvoir s'afficher meme sans Drive connecte).
+    """
+    from starlette.concurrency import run_in_threadpool
 
     try:
-        graph = await connector.get_drive_graph()
-        for item in graph.get("files", []):
-            nodes.append(GalaxyNode(
-                id=item["id"], name=item.get("name", ""), mime_type=item.get("mimeType", ""), url=item.get("url", "")
-            ))
-            if item.get("parentId"):
-                links.append(GalaxyLink(source=item["parentId"], target=item["id"]))
-    except connector.ConnectorError:
-        # Le connecteur Drive peut etre indisponible : on renvoie quand meme les planetes
-        # systeme plutot que de faire echouer toute la Galaxie.
-        pass
+        files = await run_in_threadpool(list_drive_files_native)
+    except Exception:
+        files = []
 
-    return GalaxyResponse(nodes=nodes, links=links)
+    nodes = [GalaxyNode(id=f["id"], name=f["name"], type=f["type"]) for f in files]
+    return GalaxyResponse(nodes=nodes)
 
 
 @app.get("/boot", response_model=BootResponse)
@@ -810,12 +1020,12 @@ async def api_models_select(req: SwitchBrainRequest):
 
 
 # ----------------------------------------------------------------------------
-# Endpoints de gestion de la memoire (nouveaux)
+# Endpoints de gestion de la memoire
 # ----------------------------------------------------------------------------
 
 @app.get("/api/memory")
 async def api_get_memory():
-    """Renvoie les faits actuellement memorises en long terme (contenu de memory.json)."""
+    """Renvoie les faits actuellement memorises en long terme (contenu de user_memory.json)."""
     with LONG_TERM_MEMORY_LOCK:
         facts = _read_memory_file()
     return {"facts": facts}
@@ -872,10 +1082,10 @@ async def chat(req: ChatRequest):
     """
     Envoie un prompt au LLM actif (ou a un fournisseur/modele precise ponctuellement), avec
     la personnalite JARVIS toujours appliquee, enrichie a chaque requete de la date/heure
-    courante, du cerveau actif, ET de la memoire long terme locale (memory.json).
+    courante, du cerveau actif, ET de la memoire long terme locale (user_memory.json).
 
-    L'historique de conversation est desormais garanti cote SERVEUR : chaque session
-    (identifiee par session_id) conserve ses N derniers messages dans SESSION_HISTORIES,
+    L'historique de conversation est garanti cote SERVEUR : chaque session (identifiee par
+    session_id) conserve ses MAX_SESSION_MESSAGES derniers messages dans SESSION_HISTORIES,
     independamment de ce que renvoie (ou non) le frontend. Le frontend peut continuer a
     envoyer 'history', il sert seulement a amorcer une session vide.
 
@@ -887,13 +1097,14 @@ async def chat(req: ChatRequest):
 
     Deux court-circuits rapides, sans passer par le LLM :
       - "Rappelle-toi que...", "Note que...", "Souviens-toi que..." -> memorisation immediate,
-        a la fois dans le connecteur Drive (remember_note) ET dans memory.json (local).
+        a la fois dans le connecteur Drive (remember_note) ET dans user_memory.json (local).
       - "Passe sur Groq", "Quel cerveau utilises-tu ?" -> changement/etat du cerveau immediat.
 
-    Pour toute autre demande (ex: "combien de mails Gmail aujourd'hui ?"), le prompt est envoye
-    au LLM actif AVEC les definitions d'outils (tools.get_*_tools()) : c'est le LLM qui decide
-    d'appeler reellement l'outil (ex: get_unread_emails), et la reponse finale integre le
-    resultat reel de l'outil, pas une reponse statique.
+    Pour toute autre demande (ex: "combien de mails Gmail aujourd'hui ?" ou "enregistre mon
+    pronostic Sarmiento-Rivadavia"), le prompt est envoye au LLM actif AVEC les definitions
+    d'outils (tools.get_*_tools()) : c'est le LLM qui decide d'appeler reellement l'outil (ex:
+    get_unread_emails, save_football_prediction, execute_apps_script_action), et la reponse
+    finale integre le resultat reel de l'outil, pas une reponse statique.
 
     Toute la logique d'appel LLM est protegee par un try/except global : le frontend ne
     recoit jamais une erreur HTTP 500/404 brute, mais toujours une reponse JSON exploitable.
@@ -924,7 +1135,8 @@ async def chat(req: ChatRequest):
         if memory_content:
             result = await tools.execute_tool("remember_note", {"content": memory_content})
             # En plus du connecteur Drive, on ecrit systematiquement dans la memoire locale
-            # (memory.json), qui sert de source fiable et rapide pour l'injection au system prompt.
+            # (user_memory.json), qui sert de source fiable et rapide pour l'injection au
+            # system prompt.
             append_long_term_memory(memory_content)
             if isinstance(result, dict) and result.get("error"):
                 response_text = persona.get_memory_failure_line(result["error"])
@@ -973,7 +1185,7 @@ async def chat(req: ChatRequest):
 
     # ------------------------------------------------------------------------
     # Construction du system prompt : personnalite + date/heure + cerveau actif +
-    # memoire long terme locale (memory.json), injectee discretement.
+    # memoire long terme locale (user_memory.json), injectee discretement.
     # ------------------------------------------------------------------------
     long_term_memory_text = load_long_term_memory_text()
     extra_instructions = req.system or ""
@@ -992,8 +1204,10 @@ async def chat(req: ChatRequest):
 
     # ------------------------------------------------------------------------
     # Appel LLM normal (ou vision avec fallback automatique), avec function calling reel.
-    # C'est ICI que Gmail / Drive / Sheets / recherche web sont effectivement executes,
-    # via dispatch_to_provider -> run_gemini_chat / run_openai_style_chat -> tools.execute_tool.
+    # C'est ICI que Gmail / Drive / Sheets / recherche web / pronostics sont effectivement
+    # executes, via dispatch_to_provider -> run_gemini_chat / run_openai_style_chat ->
+    # execute_tool_with_local_overrides (qui route vers save_football_prediction,
+    # execute_apps_script_action, ou tools.execute_tool selon l'outil demande).
     # Le tout est protege globalement pour ne jamais renvoyer une erreur brute au frontend.
     # ------------------------------------------------------------------------
     try:
