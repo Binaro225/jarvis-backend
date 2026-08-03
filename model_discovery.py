@@ -24,6 +24,7 @@ PROVIDER_ENDPOINTS = {
     "gemini": "https://generativelanguage.googleapis.com/v1beta/models",
     "groq": "https://api.groq.com/openai/v1/models",
     "mistral": "https://api.mistral.ai/v1/models",
+    "grok": "https://api.x.ai/v1/models",
 }
 
 REQUEST_TIMEOUT = 15
@@ -145,11 +146,34 @@ async def fetch_mistral_models(api_key: str) -> List[Dict[str, Any]]:
     return models
 
 
+# ----------------------------------------------------------------------------
+# xAI (Grok)
+# ----------------------------------------------------------------------------
+
+async def fetch_xai_models(api_key: str) -> List[Dict[str, Any]]:
+    data = await _get(PROVIDER_ENDPOINTS["grok"], headers={"Authorization": f"Bearer {api_key}"})
+    if not data:
+        return []
+    models = []
+    for item in data.get("data", []):
+        model_id = item.get("id", "")
+        models.append({
+            "id": model_id,
+            "name": model_id,
+            "provider": "grok",
+            "is_free": False,  # xAI n'a pas de palier gratuit au moment de l'ecriture
+            "supports_vision": "vision" in model_id.lower(),
+            "supports_tools": True,
+        })
+    return models
+
+
 FETCHERS = {
     "openrouter": fetch_openrouter_models,
     "gemini": fetch_gemini_models,
     "groq": fetch_groq_models,
     "mistral": fetch_mistral_models,
+    "grok": fetch_xai_models,
 }
 
 
@@ -169,6 +193,7 @@ async def discover_models(force_refresh: bool = False) -> Dict[str, List[Dict[st
         "gemini": "GEMINI_API_KEY",
         "groq": "GROQ_API_KEY",
         "mistral": "MISTRAL_API_KEY",
+        "grok": "XAI_API_KEY",
     }
 
     result: Dict[str, List[Dict[str, Any]]] = {}
