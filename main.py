@@ -1,6 +1,6 @@
 """
 Backend Python leger - FastAPI multi-fournisseurs LLM (gratuit) + Function Calling
-Fournisseurs supportes : Gemini, Groq, Mistral, OpenRouter
+Fournisseurs supportes : Gemini, Groq, Mistral, OpenRouter, Grok
 Outils (tools) : connecteur Google Apps Script (Drive / Docs / Sheets / Gmail / Calendar)
 Recherche web : Tavily (temps reel)
 Deploiement : Render (voir Procfile) - sert aussi le frontend (index.html) directement.
@@ -12,11 +12,20 @@ MEMOIRE :
   envoye par le frontend, pour ne jamais perdre le fil meme si le frontend ne renvoie rien.
 - Long terme : fichier local user_memory.json a la racine du projet (avec migration
   automatique depuis l'ancien memory.json s'il existe), injecte dans le system prompt a
-  chaque requete /chat, et mis a jour automatiquement via le court-circuit "Retiens que ..."
-  (en plus de l'ecriture existante vers le connecteur Drive).
+  chaque requete /chat, et mis a jour automatiquement via deux court-circuits complementaires
+  (voir detect_memory_shortcut() et total_recall.extract_memory_content()), en plus de
+  l'ecriture existante vers le connecteur Drive (remember_note).
+
+GALAXIE 3D :
+- L'endpoint GET /api/galaxy alimente le rendu Three.js du frontend : chaque fichier Google
+  Drive devient un noeud (planete si Google Sheets, etoile sinon). Depuis cette version, la
+  liste des fichiers est obtenue via le connecteur Apps Script (connector.get_drive_graph),
+  exactement comme tous les autres outils Drive/Docs/Sheets/Gmail/Calendar - donc plus besoin
+  d'un compte de service Google separe ni de credentials supplementaires a gerer.
 """
 
 import os
+import re
 import json
 import httpx
 import threading
@@ -230,6 +239,51 @@ def append_long_term_memory(content: str) -> Dict[str, Any]:
 
 
 # ----------------------------------------------------------------------------
+# COURT-CIRCUIT MEMOIRE : detection rapide des formules de memorisation explicites
+# ----------------------------------------------------------------------------
+# Complementaire a total_recall.extract_memory_content() (qui peut couvrir des formulations
+# plus larges) : cette detection regex garantit que les formulations explicitement demandees
+# ("retiens que", "souviens-toi que", "note que", "a partir de maintenant", ...) sont TOUJOURS
+# interceptees AVANT tout appel LLM, quelle que soit la logique interne de total_recall.py.
+MEMORY_SHORTCUT_PATTERNS: List[str] = [
+    r"^retiens\s+(?:bien\s+)?que\s+(.+)",
+    r"^retiens\s*[:\-]\s*(.+)",
+    r"^souviens[\s-]toi\s+que\s+(.+)",
+    r"^rappelle[\s-]toi\s+que\s+(.+)",
+    r"^note\s+(?:bien\s+)?que\s+(.+)",
+    r"^n['’]oublie\s+pas\s+que\s+(.+)",
+    r"^a\s+partir\s+de\s+maintenant[,]?\s*(.+)",
+    r"^à\s+partir\s+de\s+maintenant[,]?\s*(.+)",
+    r"^d[ée]sormais[,]?\s*(.+)",
+    r"^dor[ée]navant[,]?\s*(.+)",
+    r"^memorise\s+(?:bien\s+)?que\s+(.+)",
+    r"^m[ée]morise\s+(?:bien\s+)?que\s+(.+)",
+]
+_COMPILED_MEMORY_PATTERNS = [re.compile(p, flags=re.IGNORECASE) for p in MEMORY_SHORTCUT_PATTERNS]
+
+
+def detect_memory_shortcut(prompt: str) -> Optional[str]:
+    """Detecte si le prompt correspond a une formule explicite de memorisation ("retiens que
+    ...", "souviens-toi que ...", "a partir de maintenant ...", etc.) et renvoie directement
+    le contenu a memoriser (texte original, casse preservee), ou None si aucune formule ne
+    correspond. Le matching est fait sur le texte normalise (strip), mais le contenu renvoye
+    est extrait du texte ORIGINAL (pas de la version en minuscules) pour ne pas deformer les
+    noms propres, chiffres, etc."""
+    if not prompt:
+        return None
+    text = prompt.strip()
+    if not text:
+        return None
+    for pattern in _COMPILED_MEMORY_PATTERNS:
+        match = pattern.match(text)
+        if match and match.groups():
+            content = match.group(1).strip()
+            if content:
+                return content
+    return None
+
+
+# ----------------------------------------------------------------------------
 # FastAPI app
 # ----------------------------------------------------------------------------
 
@@ -237,10 +291,10 @@ app = FastAPI(
     title="JARVIS Backend - Multi-LLM avec Function Calling",
     description=(
         "Backend leger FastAPI - Multi-fournisseurs LLM gratuits (Gemini, Groq, Mistral, "
-        "OpenRouter) avec function calling vers l'ecosysteme Google (Drive/Docs/Sheets/"
+        "OpenRouter, Grok) avec function calling vers l'ecosysteme Google (Drive/Docs/Sheets/"
         "Gmail/Calendar) et recherche web temps reel (Tavily)."
     ),
-    version="3.2.0",
+    version="3.3.0",
 )
 
 app.add_middleware(
@@ -366,7 +420,7 @@ class ModelInfo(BaseModel):
 class GalaxyNode(BaseModel):
     id: str
     name: str
-    type: str = "file"
+    type: str = "file"  # "spreadsheet" (planete) ou "file" (etoile), voir /api/galaxy
 
 
 class GalaxyResponse(BaseModel):
@@ -378,7 +432,7 @@ class MemoryFactRequest(BaseModel):
 
 
 # ----------------------------------------------------------------------------
-# Fournisseurs "compatibles OpenAI" (Groq, Mistral, OpenRouter)
+# Fournisseurs "compatibles OpenAI" (Groq, Mistral, OpenRouter, Grok)
 # ----------------------------------------------------------------------------
 
 async def call_openai_compatible_raw(
@@ -427,8 +481,8 @@ async def run_openai_style_chat(
     image_base64: Optional[str] = None,
 ) -> (str, List[ToolCallLog]):
     """Gere la boucle complete prompt -> (appels d'outils eventuels) -> reponse finale,
-    pour tout fournisseur compatible OpenAI (Groq, Mistral, OpenRouter), avec historique et
-    support vision optionnel (image jointe encodee en base64)."""
+    pour tout fournisseur compatible OpenAI (Groq, Mistral, OpenRouter, Grok), avec historique
+    et support vision optionnel (image jointe encodee en base64)."""
 
     messages: List[Dict[str, Any]] = []
     if system:
@@ -688,31 +742,7 @@ async def execute_tool_with_local_overrides(fn_name: str, fn_args: Dict[str, Any
 
     IMPORTANT : pour que le LLM sache que ces outils existent et decide de les appeler, il
     faut declarer leur schema de function calling dans tools.py (voir TOOLS / get_openai_tools
-    / get_gemini_tools). Schema a ajouter dans tools.py pour le nouvel outil generique
-    'execute_apps_script_action' (en plus de 'save_football_prediction', deja declare) :
-
-        {
-            "name": "execute_apps_script_action",
-            "description": "Transmet une action et des donnees structurees arbitraires au "
-                            "WebApp Google Apps Script (ex: enregistrer une ecriture "
-                            "financiere, mettre a jour un client, etc.), au-dela des seuls "
-                            "pronostics de football.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "description": "Nom de l'action a router cote Apps Script (ex: "
-                                       "'save_revenue', 'update_client').",
-                    },
-                    "data": {
-                        "type": "object",
-                        "description": "Payload JSON libre associe a cette action.",
-                    },
-                },
-                "required": ["action", "data"],
-            },
-        }
+    / get_gemini_tools).
     """
     if fn_name == "save_football_prediction":
         return await save_football_prediction(fn_args)
@@ -839,7 +869,6 @@ async def list_providers():
             GAS_ACTIONS_WEBAPP_URL and GAS_ACTIONS_WEBAPP_URL != "URL_DE_TON_APPS_SCRIPT"
         ),
         "web_search_configured": bool(os.getenv("TAVILY_API_KEY")),
-        "gdrive_native_configured": bool(os.getenv("GDRIVE_SERVICE_ACCOUNT_FILE") or os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON")),
     }
 
 
@@ -856,118 +885,60 @@ async def api_models(refresh: bool = False):
 
 
 # ----------------------------------------------------------------------------
-# Google Drive natif (google-api-python-client) pour /api/galaxy
+# GALAXIE 3D : GET /api/galaxy
 # ----------------------------------------------------------------------------
-# Deux modes d'authentification supportes, au choix :
-#   - GDRIVE_SERVICE_ACCOUNT_FILE : chemin vers un fichier JSON de compte de service.
-#   - GDRIVE_SERVICE_ACCOUNT_JSON : le contenu JSON du compte de service directement dans la
-#     variable d'environnement (pratique sur Render, ou on ne peut pas toujours uploader un
-#     fichier a cote du code).
-# Le compte de service doit avoir acces en lecture au Drive concerne (partage du dossier avec
-# son adresse email de type ...@...iam.gserviceaccount.com), ou utiliser un Shared Drive.
-GDRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
-GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID")  # optionnel : limite le listing a ce dossier
-
-# Correspondance mimeType Google -> "type" simplifie pour l'affichage Three.js.
-GDRIVE_MIME_TO_TYPE = {
-    "application/vnd.google-apps.spreadsheet": "spreadsheet",
-    "application/vnd.google-apps.document": "document",
-    "application/vnd.google-apps.presentation": "presentation",
-    "application/vnd.google-apps.folder": "folder",
-    "application/vnd.google-apps.form": "form",
-    "application/pdf": "pdf",
-}
-
-
-def _load_gdrive_credentials():
-    """Construit les credentials Google a partir d'un fichier ou d'une variable d'env JSON.
-    Renvoie None si aucune configuration n'est presente (l'appelant doit gerer ce cas)."""
-    from google.oauth2 import service_account
-
-    service_account_file = os.getenv("GDRIVE_SERVICE_ACCOUNT_FILE")
-    if service_account_file and Path(service_account_file).exists():
-        return service_account.Credentials.from_service_account_file(service_account_file, scopes=GDRIVE_SCOPES)
-
-    service_account_json = os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON")
-    if service_account_json:
-        info = json.loads(service_account_json)
-        return service_account.Credentials.from_service_account_info(info, scopes=GDRIVE_SCOPES)
-
-    return None
-
-
-def _mime_to_simple_type(mime_type: str) -> str:
-    return GDRIVE_MIME_TO_TYPE.get(mime_type, "file")
-
-
-def list_drive_files_native() -> List[Dict[str, str]]:
-    """Interroge directement l'API Google Drive (via google-api-python-client), SANS AUCUN
-    CACHE, a chaque appel : renvoie une liste simplifiee de fichiers {id, name, type}, prete a
-    etre transformee en noeuds pour la Galaxie 3D. Fonction synchrone (le client Google API ne
-    fournit pas d'API async native) ; appelee via run_in_threadpool depuis l'endpoint pour ne
-    pas bloquer la boucle asyncio."""
-    from googleapiclient.discovery import build
-
-    credentials = _load_gdrive_credentials()
-    if credentials is None:
-        raise RuntimeError(
-            "Aucune credential Google Drive configuree. Definissez GDRIVE_SERVICE_ACCOUNT_FILE "
-            "(chemin vers le JSON du compte de service) ou GDRIVE_SERVICE_ACCOUNT_JSON (contenu JSON)."
-        )
-
-    service = build("drive", "v3", credentials=credentials, cache_discovery=False)
-
-    query_parts = ["trashed = false"]
-    if GDRIVE_FOLDER_ID:
-        query_parts.append(f"'{GDRIVE_FOLDER_ID}' in parents")
-    query = " and ".join(query_parts)
-
-    files: List[Dict[str, str]] = []
-    page_token = None
-    while True:
-        response = (
-            service.files()
-            .list(
-                q=query,
-                spaces="drive",
-                fields="nextPageToken, files(id, name, mimeType)",
-                pageToken=page_token,
-                pageSize=200,
-            )
-            .execute()
-        )
-        for f in response.get("files", []):
-            files.append(
-                {
-                    "id": f["id"],
-                    "name": f.get("name", "Sans nom"),
-                    "type": _mime_to_simple_type(f.get("mimeType", "")),
-                }
-            )
-        page_token = response.get("nextPageToken")
-        if not page_token:
-            break
-
-    return files
+# Interroge Google Drive VIA LE CONNECTEUR APPS SCRIPT (connector.get_drive_graph), au lieu
+# d'un compte de service Google separe : ainsi l'authentification est unique et identique a
+# celle deja utilisee pour tous les autres outils (Drive/Docs/Sheets/Gmail/Calendar). Chaque
+# fichier devient un noeud pour le rendu Three.js cote frontend :
+#   - type = "spreadsheet" (rendu en planete) des que le mimeType contient "spreadsheet" ;
+#   - type = "file" (rendu en etoile) pour tout le reste (Docs, PDF, dossiers, images, etc.).
+def _classify_galaxy_node_type(mime_type: str) -> str:
+    """Determine le type de noeud pour le rendu 3D a partir du mimeType Google Drive."""
+    mime_lower = (mime_type or "").lower()
+    if "spreadsheet" in mime_lower:
+        return "spreadsheet"
+    return "file"
 
 
 @app.get("/api/galaxy", response_model=GalaxyResponse)
 async def api_galaxy():
-    """Interroge l'API Google Drive native (google-api-python-client) EN DIRECT a chaque appel
-    (pas de cache), et renvoie les fichiers accessibles au compte de service sous forme de
-    noeuds {id, name, type} pour alimenter la Galaxie 3D (Three.js) du frontend.
-
-    En cas d'absence de configuration ou d'erreur d'API, renvoie une liste vide plutot que de
-    faire echouer toute la requete (la Galaxie doit pouvoir s'afficher meme sans Drive connecte).
     """
-    from starlette.concurrency import run_in_threadpool
+    Renvoie les fichiers Google Drive accessibles a l'utilisateur, sous forme de noeuds
+    {id, name, type} destines a la Galaxie 3D (Three.js) du frontend :
+      - "spreadsheet" (Google Sheets) -> rendu comme une planete
+      - "file" (tout le reste)        -> rendu comme une etoile
 
+    La liste est obtenue via connector.get_drive_graph(), qui appelle le meme WebApp Apps
+    Script (action 'get_drive_graph') que les autres outils Drive - donc aucune credential
+    supplementaire a configurer.
+
+    Proteg par un try/except global : si le Drive n'est pas encore authentifie (GAS_WEBAPP_URL
+    non configuree, jeton invalide, script non deploye, erreur reseau...), on renvoie une liste
+    de noeuds VIDE plutot que de faire echouer la requete. La Galaxie doit pouvoir s'afficher
+    (vide) meme sans connexion Drive active, pour ne jamais casser le frontend.
+    """
     try:
-        files = await run_in_threadpool(list_drive_files_native)
+        graph = await connector.get_drive_graph()
+        raw_files = graph.get("files", []) if isinstance(graph, dict) else []
+    except connector.ConnectorError:
+        # Drive non authentifie / GAS_WEBAPP_URL absente / script non deploye : fallback propre.
+        raw_files = []
     except Exception:
-        files = []
+        # Filet de securite ultime : ne jamais faire remonter une erreur brute au frontend.
+        raw_files = []
 
-    nodes = [GalaxyNode(id=f["id"], name=f["name"], type=f["type"]) for f in files]
+    nodes: List[GalaxyNode] = []
+    for f in raw_files:
+        if not isinstance(f, dict):
+            continue
+        file_id = f.get("id")
+        if not file_id:
+            continue
+        name = f.get("name") or "Sans nom"
+        node_type = _classify_galaxy_node_type(f.get("mimeType", ""))
+        nodes.append(GalaxyNode(id=file_id, name=name, type=node_type))
+
     return GalaxyResponse(nodes=nodes)
 
 
@@ -1047,14 +1018,20 @@ async def api_clear_session(session_id: str):
 
 def extract_source_node_ids(tools_used: List[ToolCallLog]) -> List[str]:
     """Parcourt les resultats d'outils pour en extraire les IDs de fichiers Drive touches,
-    afin que le frontend puisse illuminer les noeuds correspondants dans la Galaxie 3D."""
+    afin que le frontend puisse illuminer les noeuds correspondants dans la Galaxie 3D.
+
+    Recherche explicitement les cles 'id', 'spreadsheetId' et 'fileId' (les trois noms de
+    cles couramment renvoyes par les differentes actions Apps Script / API Google), en plus
+    d'un parcours recursif complet de la structure (listes imbriquees, sous-objets)."""
     ids: List[str] = []
+    target_keys = ("id", "spreadsheetId", "fileId")
 
     def collect(obj: Any):
         if isinstance(obj, dict):
-            file_id = obj.get("id")
-            if isinstance(file_id, str) and file_id and file_id not in ids:
-                ids.append(file_id)
+            for key in target_keys:
+                value = obj.get(key)
+                if isinstance(value, str) and value and value not in ids:
+                    ids.append(value)
             for value in obj.values():
                 collect(value)
         elif isinstance(obj, list):
@@ -1095,10 +1072,15 @@ async def chat(req: ChatRequest):
     routee vers le meilleur modele vision disponible, avec bascule (fallback) sur le modele
     vision suivant en cas d'echec du premier - liste decouverte dynamiquement, aucun modele fige.
 
-    Deux court-circuits rapides, sans passer par le LLM :
-      - "Rappelle-toi que...", "Note que...", "Souviens-toi que..." -> memorisation immediate,
-        a la fois dans le connecteur Drive (remember_note) ET dans user_memory.json (local).
-      - "Passe sur Groq", "Quel cerveau utilises-tu ?" -> changement/etat du cerveau immediat.
+    Trois court-circuits rapides, SANS passer par le LLM (donc sans consommer de tokens) :
+      1. Formules de memorisation explicites ("Retiens que...", "Souviens-toi que...",
+         "Note que...", "A partir de maintenant...") -> detect_memory_shortcut() (regex locale,
+         garantie de fonctionner independamment de total_recall.py) ; en complement,
+         total_recall.extract_memory_content() reste egalement verifie pour couvrir des
+         formulations plus larges. Des qu'un contenu est extrait par l'une ou l'autre methode,
+         memorisation IMMEDIATE dans le connecteur Drive (remember_note) ET dans
+         user_memory.json (local), puis reponse retournee sans jamais appeler un LLM.
+      2. "Passe sur Groq", "Quel cerveau utilises-tu ?" -> changement/etat du cerveau immediat.
 
     Pour toute autre demande (ex: "combien de mails Gmail aujourd'hui ?" ou "enregistre mon
     pronostic Sarmiento-Rivadavia"), le prompt est envoye au LLM actif AVEC les definitions
@@ -1128,10 +1110,10 @@ async def chat(req: ChatRequest):
     use_tools_flag = req.use_tools if req.use_tools is not None else True
 
     # ------------------------------------------------------------------------
-    # Court-circuit 1 : Total Recall (memorisation instantanee)
+    # Court-circuit 1 : memorisation instantanee (Total Recall + detection locale explicite)
     # ------------------------------------------------------------------------
     if use_tools_flag and not req.image_base64:
-        memory_content = total_recall.extract_memory_content(req.prompt)
+        memory_content = detect_memory_shortcut(req.prompt) or total_recall.extract_memory_content(req.prompt)
         if memory_content:
             result = await tools.execute_tool("remember_note", {"content": memory_content})
             # En plus du connecteur Drive, on ecrit systematiquement dans la memoire locale
@@ -1150,6 +1132,10 @@ async def chat(req: ChatRequest):
                 response=cleaned,
                 session_id=session_id,
                 tools_used=[ToolCallLog(name="remember_note", arguments={"content": memory_content}, result=result)],
+                source_node_ids=extract_source_node_ids(
+                    [ToolCallLog(name="remember_note", arguments={"content": memory_content}, result=result)]
+                ),
+                active_categories=["docs"],
             )
 
     # ------------------------------------------------------------------------
