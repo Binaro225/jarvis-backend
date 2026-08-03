@@ -1,8 +1,7 @@
 /**
  * JarvisInterface.jsx
  * --------------------
- * Coquille mobile-first de JARVIS : plein ecran, la Galaxie 3D en fond, aucune carte de log
- * ni texte d'outil intermediaire. Seule une petite carte flottante affiche la reponse finale.
+ * Coquille mobile-first de JARVIS avec gestion fluide et naturelle du vocal (sans boucle).
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
@@ -28,7 +27,7 @@ export default function JarvisInterface() {
   const [sourceNodeIds, setSourceNodeIds] = useState([]);
   const [activeCategories, setActiveCategories] = useState([]);
 
-  const [models, setModels] = useState({}); // { provider: [ {id,name,provider,is_free,supports_vision,supports_tools} ] }
+  const [models, setModels] = useState({});
   const [selectedProvider, setSelectedProvider] = useState(() => localStorage.getItem(LS_PROVIDER) || '');
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem(LS_MODEL) || '');
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
@@ -36,12 +35,13 @@ export default function JarvisInterface() {
   const [textValue, setTextValue] = useState('');
   const [handsFreeActive, setHandsFreeActive] = useState(false);
 
-  const historyRef = useRef([]); // [{role, content}]
+  const historyRef = useRef([]);
   const recognitionRef = useRef(null);
   const isListeningRef = useRef(false);
+  const isSpeakingRef = useRef(false);
 
   // --------------------------------------------------------------------------
-  // Chargement initial : galaxie + modeles disponibles
+  // Chargement initial
   // --------------------------------------------------------------------------
   const loadGalaxy = useCallback(async (url) => {
     try {
@@ -63,7 +63,7 @@ export default function JarvisInterface() {
       const data = await res.json();
       setModels(data || {});
     } catch (e) {
-      // la decouverte de modeles n'est pas bloquante pour le reste de l'app
+      // Non bloquant
     }
   }, []);
 
@@ -74,7 +74,6 @@ export default function JarvisInterface() {
     }
   }, [backendUrl, loadGalaxy, loadModels]);
 
-  // Initialisation/Préchargement des voix
   useEffect(() => {
     if ('speechSynthesis' in window) {
       window.speechSynthesis.getVoices();
@@ -83,54 +82,80 @@ export default function JarvisInterface() {
   }, []);
 
   // --------------------------------------------------------------------------
-  // Synthèse vocale avec délai de sécurité avant réécoute
+  // Contrôle strict du Micro (Démarrage / Arrêt)
   // --------------------------------------------------------------------------
-  const startListening = useCallback(() => {
-    if (!recognitionRef.current) return;
-    try { recognitionRef.current.start(); } catch (e) { /* deja demarree */ }
+  const stopListening = useCallback(() => {
+    isListeningRef.current = false;
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) {}
+    }
   }, []);
 
+  const startListening = useCallback(() => {
+    // Interdiction absolue d'écouter si JARVIS est en train de parler !
+    if (isSpeakingRef.current || !handsFreeActive) return;
+    if (recognitionRef.current && !isListeningRef.current) {
+      try {
+        recognitionRef.current.start();
+      } catch (e) {
+        // Déjà démarré
+      }
+    }
+  }, [handsFreeActive]);
+
+  // --------------------------------------------------------------------------
+  // Synthèse vocale naturelle (Coupe le micro pendant qu'il parle)
+  // --------------------------------------------------------------------------
   const speak = useCallback((text) => {
     if (!window.speechSynthesis || !text) {
+      isSpeakingRef.current = false;
       setJarvisState(handsFreeActive ? 'listening' : 'idle');
-      if (handsFreeActive) {
-        setTimeout(() => startListening(), 1500);
-      }
+      if (handsFreeActive) startListening();
       return;
     }
 
-    if (isListeningRef.current && recognitionRef.current) {
-      recognitionRef.current.stop();
-    }
-
+    // 1. Coupe immédiatement le micro avant de dire un mot
+    stopListening();
+    isSpeakingRef.current = true;
     window.speechSynthesis.cancel();
+
     const utter = new SpeechSynthesisUtterance(text);
     utter.lang = 'fr-FR';
-    utter.rate = 1.02;
+    utter.rate = 1.0;
 
-    utter.onstart = () => setJarvisState('speaking');
+    utter.onstart = () => {
+      isSpeakingRef.current = true;
+      setJarvisState('speaking');
+    };
 
-    const handleEnd = () => {
-      setJarvisState(handsFreeActive ? 'listening' : 'idle');
+    const handleSpeechEnd = () => {
+      isSpeakingRef.current = false;
+      setJarvisState('idle');
+
+      // 2. Attendre 1 seconde complète après la fin du texte avant de réactiver le micro
       if (handsFreeActive) {
-        // Pause de 1.5 seconde avant d'ouvrir le micro pour te laisser parler
         setTimeout(() => {
-          startListening();
-        }, 1500);
+          if (!isSpeakingRef.current) {
+            startListening();
+          }
+        }, 1000);
       }
     };
 
-    utter.onend = handleEnd;
-    utter.onerror = handleEnd;
+    utter.onend = handleSpeechEnd;
+    utter.onerror = handleSpeechEnd;
 
     window.speechSynthesis.speak(utter);
-  }, [handsFreeActive, startListening]);
+  }, [handsFreeActive, startListening, stopListening]);
 
   // --------------------------------------------------------------------------
-  // Envoi d'un prompt au backend
+  // Communication Backend
   // --------------------------------------------------------------------------
   const sendPrompt = useCallback(async (prompt) => {
     if (!prompt || !prompt.trim() || !backendUrl) return;
+
+    // Coupe l'écoute dès la soumission du message
+    stopListening();
 
     const snapshot = historyRef.current.slice();
     historyRef.current = [...historyRef.current, { role: 'user', content: prompt }].slice(-MAX_HISTORY_MESSAGES);
@@ -162,12 +187,13 @@ export default function JarvisInterface() {
     } catch (e) {
       setResponseText("Petit souci de connexion avec le backend.");
       setCardVisible(true);
-      setJarvisState(handsFreeActive ? 'listening' : 'idle');
+      setJarvisState('idle');
+      isSpeakingRef.current = false;
     }
-  }, [backendUrl, selectedProvider, selectedModel, speak, handsFreeActive]);
+  }, [backendUrl, selectedProvider, selectedModel, speak, stopListening]);
 
   // --------------------------------------------------------------------------
-  // Session mains-libres (filtrage des faux départs)
+  // Ecoute vocale (Filtrage des bruits & refus de relance en cours de parole)
   // --------------------------------------------------------------------------
   useEffect(() => {
     const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -176,22 +202,22 @@ export default function JarvisInterface() {
     const recognition = new SpeechRecognitionCtor();
     recognition.lang = 'fr-FR';
     recognition.continuous = false;
-    recognition.interimResults = true;
+    recognition.interimResults = false; // Ne traite que les phrases complètes pour éviter le bruit
 
-    recognition.onstart = () => { 
-      isListeningRef.current = true; 
-      setJarvisState('listening'); 
+    recognition.onstart = () => {
+      // Sécurité : si JARVIS parle, fermer aussitôt le micro
+      if (isSpeakingRef.current) {
+        try { recognition.stop(); } catch(e){}
+        return;
+      }
+      isListeningRef.current = true;
+      setJarvisState('listening');
     };
 
     let transcriptBuffer = '';
     recognition.onresult = (e) => {
-      let transcript = '';
-      for (let i = 0; i < e.results.length; i++) {
-        transcript += e.results[i][0].transcript;
-      }
-      transcriptBuffer = transcript;
-      if (e.results[e.results.length - 1].isFinal) {
-        recognition.stop();
+      if (e.results.length > 0) {
+        transcriptBuffer = e.results[0][0].transcript;
       }
     };
 
@@ -200,33 +226,32 @@ export default function JarvisInterface() {
       const finalText = transcriptBuffer.trim();
       transcriptBuffer = '';
 
-      // Filtre : requiert au moins 3 caractères
-      if (finalText && finalText.length >= 3) {
+      // Si JARVIS est en train de parler, ignorer totalement le résultat
+      if (isSpeakingRef.current) return;
+
+      // Valider uniquement si la phrase a du sens (plus de 4 caractères)
+      if (finalText && finalText.length >= 4) {
         sendPrompt(finalText);
-      } else if (handsFreeActive) {
-        setTimeout(() => startListening(), 1000);
       } else {
         setJarvisState('idle');
+        // Ne relance PAS le micro automatiquement si personne n'a rien dit de clair
       }
     };
 
     recognition.onerror = () => {
       isListeningRef.current = false;
-      if (handsFreeActive) {
-        setTimeout(() => startListening(), 1000);
-      } else {
-        setJarvisState('idle');
-      }
+      setJarvisState('idle');
     };
 
     recognitionRef.current = recognition;
-  }, [handsFreeActive, sendPrompt, startListening]);
+  }, [sendPrompt]);
 
   const toggleHandsFree = () => {
-    if (handsFreeActive) {
+    if (handsFreeActive || isListeningRef.current) {
       setHandsFreeActive(false);
+      isSpeakingRef.current = false;
       if (window.speechSynthesis) window.speechSynthesis.cancel();
-      if (isListeningRef.current && recognitionRef.current) recognitionRef.current.stop();
+      stopListening();
       setJarvisState('idle');
     } else {
       setHandsFreeActive(true);
@@ -235,7 +260,7 @@ export default function JarvisInterface() {
   };
 
   // --------------------------------------------------------------------------
-  // Reglages
+  // Réglages & Rendu UI
   // --------------------------------------------------------------------------
   const saveBackendUrl = (url) => {
     setBackendUrl(url);
@@ -256,7 +281,7 @@ export default function JarvisInterface() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ provider, model: modelId }),
         });
-      } catch (e) { /* la bascule est un confort, pas bloquant */ }
+      } catch (e) {}
     }
   };
 
@@ -264,7 +289,6 @@ export default function JarvisInterface() {
     <div style={styles.app}>
       <style>{CSS}</style>
 
-      {/* Barre superieure minimale : etat de connexion + reglages */}
       <div style={styles.topbar}>
         <div style={styles.brand}>
           <span className={`jx-dot ${connected ? 'jx-dot-on' : 'jx-dot-off'}`} />
@@ -276,7 +300,6 @@ export default function JarvisInterface() {
         </div>
       </div>
 
-      {/* Galaxie 3D plein ecran */}
       <div style={styles.canvasWrap}>
         <Canvas camera={{ position: [0, 6, 22], fov: 55 }}>
           <GalaxyScene
@@ -289,14 +312,12 @@ export default function JarvisInterface() {
         </Canvas>
       </div>
 
-      {/* Carte de reponse flottante : uniquement quand JARVIS a quelque chose a dire */}
       {cardVisible && responseText && (
         <div style={styles.responseCard}>
           <p style={styles.responseText}>{responseText}</p>
         </div>
       )}
 
-      {/* Barre d'entree : mic mains-libres + texte */}
       <div style={styles.inputbar}>
         <button
           style={{ ...styles.micBtn, ...(jarvisState === 'listening' ? styles.micBtnListening : {}) }}
@@ -318,11 +339,10 @@ export default function JarvisInterface() {
         />
       </div>
 
-      {/* Reglages : URL backend */}
       {settingsOpen && (
         <div style={styles.modalBackdrop} onClick={() => setSettingsOpen(false)}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-            <h3 style={styles.modalTitle}>Reglages</h3>
+            <h3 style={styles.modalTitle}>Réglages</h3>
             <input
               style={styles.fieldInput}
               defaultValue={backendUrl}
@@ -340,12 +360,11 @@ export default function JarvisInterface() {
         </div>
       )}
 
-      {/* Selecteur de modele */}
       {modelPickerOpen && (
         <div style={styles.modalBackdrop} onClick={() => setModelPickerOpen(false)}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
             <h3 style={styles.modalTitle}>Choisir un cerveau</h3>
-            {Object.keys(models).length === 0 && <p style={{ color: '#7fa3b3' }}>Aucun modele decouvert pour le moment.</p>}
+            {Object.keys(models).length === 0 && <p style={{ color: '#7fa3b3' }}>Aucun modèle découvert.</p>}
             {Object.entries(models).map(([provider, list]) => (
               <div key={provider} style={{ marginBottom: 14 }}>
                 <div style={styles.providerLabel}>{provider}</div>
@@ -358,7 +377,6 @@ export default function JarvisInterface() {
                         ...(selectedProvider === provider && selectedModel === m.id ? styles.modelChipActive : {}),
                       }}
                       onClick={() => chooseModel(provider, m.id)}
-                      title={`${m.is_free ? 'Gratuit' : 'Payant'}${m.supports_vision ? ' - Vision' : ''}`}
                     >
                       {m.name || m.id}
                     </button>
@@ -372,10 +390,6 @@ export default function JarvisInterface() {
     </div>
   );
 }
-
-// ----------------------------------------------------------------------------
-// Styles
-// ----------------------------------------------------------------------------
 
 const styles = {
   app: {
