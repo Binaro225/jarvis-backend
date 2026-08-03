@@ -54,6 +54,11 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
             "X-Title": os.getenv("OPENROUTER_SITE_NAME", "Multi-LLM Backend"),
         },
     },
+    "grok": {
+        "key_env": "XAI_API_KEY",
+        "family": "openai_compatible",
+        "base_url": "https://api.x.ai/v1",
+    },
 }
 
 MAX_TOOL_ITERATIONS = 5  # garde-fou contre les boucles d'appels d'outils infinies
@@ -129,6 +134,36 @@ class ChatResponse(BaseModel):
     response: str
     tools_used: List[ToolCallLog] = []
     source_node_ids: List[str] = []  # IDs de fichiers Drive touches par les outils, pour illuminer la Galaxie 3D
+    active_categories: List[str] = []  # categories de planetes a mettre en focus (drive/docs/sheets/gmail/prediction/search)
+
+
+# Categorie de "planete" associee a chaque outil, utilisee par le frontend (Galaxie 3D) pour
+# savoir sur quelle constellation zoomer/faire pulser la camera pendant l'execution d'un outil,
+# meme quand l'action ne correspond a aucun fichier Drive precis (ex: recherche web, prediction).
+TOOL_CATEGORY: Dict[str, str] = {
+    "search_google_drive": "drive",
+    "list_drive_files": "drive",
+    "read_drive_file": "drive",
+    "get_file_details": "drive",
+    "organize_drive_file": "drive",
+    "save_note_to_drive": "docs",
+    "remember_note": "docs",
+    "create_google_doc": "docs",
+    "read_google_doc": "docs",
+    "write_google_doc": "docs",
+    "create_google_sheet": "sheets",
+    "read_google_sheet": "sheets",
+    "write_google_sheet": "sheets",
+    "update_sheet_cell": "sheets",
+    "append_google_sheet_row": "sheets",
+    "get_unread_emails": "gmail",
+    "send_gmail": "gmail",
+    "create_gmail_draft": "gmail",
+    "list_calendar_events": "gmail",
+    "create_calendar_event": "gmail",
+    "predict_football_match": "prediction",
+    "web_search": "search",
+}
 
 
 class SwitchBrainRequest(BaseModel):
@@ -546,25 +581,37 @@ async def api_models(refresh: bool = False):
     return grouped
 
 
+# Planetes "systeme" sans fichier Drive correspondant : toujours presentes dans la Galaxie pour
+# que la camera ait une cible meme quand JARVIS utilise Gmail, la prediction football, ou le
+# web_search (mime_type prefixe "system/" pour un code couleur dedie cote frontend).
+SYSTEM_GALAXY_NODES = [
+    GalaxyNode(id="system:gmail", name="Gmail", mime_type="system/gmail", url=""),
+    GalaxyNode(id="system:prediction", name="Predicteur Football", mime_type="system/prediction", url=""),
+    GalaxyNode(id="system:search", name="Recherche Web", mime_type="system/search", url=""),
+]
+
+
 @app.get("/api/galaxy", response_model=GalaxyResponse)
 async def api_galaxy():
-    """Construit le graphe (nodes/links) des fichiers Google Drive de l'utilisateur, pour
-    alimenter la Galaxie 3D du frontend. Chaque fichier est un noeud ; chaque lien dossier -> fichier
-    est une arete."""
+    """Construit le graphe (nodes/links) des fichiers Google Drive de l'utilisateur, augmente de
+    planetes 'systeme' fixes (Gmail, prediction football, recherche web), pour alimenter la
+    Galaxie 3D du frontend. Chaque fichier est un noeud ; chaque lien dossier -> fichier est une arete."""
+    nodes: List[GalaxyNode] = list(SYSTEM_GALAXY_NODES)
+    links: List[GalaxyLink] = []
+
     try:
         graph = await connector.get_drive_graph()
-    except connector.ConnectorError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        for item in graph.get("files", []):
+            nodes.append(GalaxyNode(
+                id=item["id"], name=item.get("name", ""), mime_type=item.get("mimeType", ""), url=item.get("url", "")
+            ))
+            if item.get("parentId"):
+                links.append(GalaxyLink(source=item["parentId"], target=item["id"]))
+    except connector.ConnectorError:
+        # Le connecteur Drive peut etre indisponible : on renvoie quand meme les planetes
+        # systeme plutot que de faire echouer toute la Galaxie.
+        pass
 
-    nodes = [
-        GalaxyNode(id=item["id"], name=item.get("name", ""), mime_type=item.get("mimeType", ""), url=item.get("url", ""))
-        for item in graph.get("files", [])
-    ]
-    links = [
-        GalaxyLink(source=item["parentId"], target=item["id"])
-        for item in graph.get("files", [])
-        if item.get("parentId")
-    ]
     return GalaxyResponse(nodes=nodes, links=links)
 
 
@@ -578,31 +625,42 @@ async def boot():
         return BootResponse(message="Systeme en ligne.")
 
 
-@app.post("/switch-brain", response_model=SwitchBrainResponse)
-async def switch_brain(req: SwitchBrainRequest):
-    """Change dynamiquement le fournisseur / modele LLM actif par defaut."""
-    provider = req.provider.lower().strip()
-
+async def _perform_brain_switch(provider: str, model: Optional[str] = None) -> SwitchBrainResponse:
+    """Logique commune de bascule de cerveau, partagee par /switch-brain et /api/models/select."""
+    provider = provider.lower().strip()
     if provider not in PROVIDERS:
         raise HTTPException(
             status_code=400,
             detail=f"Fournisseur inconnu '{provider}'. Choix possibles: {list(PROVIDERS.keys())}",
         )
 
-    model = req.model
-    if not model:
+    resolved_model = model
+    if not resolved_model:
         try:
-            model = await model_discovery.get_default_model_for_provider(provider)
+            resolved_model = await model_discovery.get_default_model_for_provider(provider)
         except ValueError as e:
             raise HTTPException(status_code=502, detail=str(e))
 
     current_brain["provider"] = provider
-    current_brain["model"] = model
+    current_brain["model"] = resolved_model
 
     return SwitchBrainResponse(
-        message=f"Cerveau actif change pour '{provider}' ({model}).",
+        message=f"Cerveau actif change pour '{provider}' ({resolved_model}).",
         current_brain=current_brain,
     )
+
+
+@app.post("/switch-brain", response_model=SwitchBrainResponse)
+async def switch_brain(req: SwitchBrainRequest):
+    """Change dynamiquement le fournisseur / modele LLM actif par defaut."""
+    return await _perform_brain_switch(req.provider, req.model)
+
+
+@app.post("/api/models/select", response_model=SwitchBrainResponse)
+async def api_models_select(req: SwitchBrainRequest):
+    """Alias de /switch-brain, nomme selon la convention /api/models : bascule a chaud le
+    fournisseur/modele actif depuis le selecteur de modeles du frontend, sans redemarrer le serveur."""
+    return await _perform_brain_switch(req.provider, req.model)
 
 
 def extract_source_node_ids(tools_used: List[ToolCallLog]) -> List[str]:
@@ -624,6 +682,17 @@ def extract_source_node_ids(tools_used: List[ToolCallLog]) -> List[str]:
     for call in tools_used:
         collect(call.result)
     return ids
+
+
+def extract_active_categories(tools_used: List[ToolCallLog]) -> List[str]:
+    """Deduit les categories de planetes (drive/docs/sheets/gmail/prediction/search) touchees
+    par les outils appeles pendant ce tour, pour piloter le focus camera de la Galaxie 3D."""
+    categories: List[str] = []
+    for call in tools_used:
+        category = TOOL_CATEGORY.get(call.name)
+        if category and category not in categories:
+            categories.append(category)
+    return categories
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -762,6 +831,7 @@ async def chat(req: ChatRequest):
         response=persona.clean_text_for_voice(answer),
         tools_used=tools_used,
         source_node_ids=extract_source_node_ids(tools_used),
+        active_categories=extract_active_categories(tools_used),
     )
 
 
