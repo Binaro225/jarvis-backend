@@ -31,7 +31,6 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
-    // --- SCÈNE 3D GALAXY ---
     function GalaxyCanvas() {
       const mountRef = useRef(null);
 
@@ -87,61 +86,98 @@
       return <div ref={mountRef} className="absolute inset-0 z-0" />;
     }
 
-    // --- INTERFACE JARVIS FUTURISTE ---
     function JarvisApp() {
       const [input, setInput] = useState('');
-      const [lastResponse, setLastResponse] = useState('Système prêt. En attente de commande...');
+      const [lastResponse, setLastResponse] = useState('Système prêt. Écoute continue active.');
       const [isListening, setIsListening] = useState(false);
       const [isSpeaking, setIsSpeaking] = useState(false);
+      
+      const recognitionRef = useRef(null);
+      const isSpeakingRef = useRef(false);
 
-      // Fait parler JARVIS (Synthèse Vocale)
-      const speak = (text) => {
+      // Préchargement immédiat des voix du système pour éliminer la latence
+      useEffect(() => {
         if ('speechSynthesis' in window) {
-          window.speechSynthesis.cancel();
+          window.speechSynthesis.getVoices();
+          window.speechSynthesis.onvoiceschanged = () => {
+            window.speechSynthesis.getVoices();
+          };
+        }
+      }, []);
+
+      useEffect(() => {
+        isSpeakingRef.current = isSpeaking;
+      }, [isSpeaking]);
+
+      // Synthèse Vocale instantanée à vitesse normale
+      const speak = (text, onComplete) => {
+        if ('speechSynthesis' in window) {
+          window.speechSynthesis.cancel(); // Annule tout retard accumulé
+          
           const utterance = new SpeechSynthesisUtterance(text);
           utterance.lang = 'fr-FR';
-          utterance.rate = 1.0;
-          utterance.pitch = 0.9;
+          utterance.rate = 1.0; // Vitesse normale
+          utterance.pitch = 1.0;
           
           utterance.onstart = () => setIsSpeaking(true);
-          utterance.onend = () => setIsSpeaking(false);
-          utterance.onerror = () => setIsSpeaking(false);
+          utterance.onend = () => {
+            setIsSpeaking(false);
+            if (onComplete) onComplete();
+          };
+          utterance.onerror = () => {
+            setIsSpeaking(false);
+            if (onComplete) onComplete();
+          };
 
+          // Lancement immédiat
           window.speechSynthesis.speak(utterance);
+        } else if (onComplete) {
+          onComplete();
         }
       };
 
-      // Reconnaissance vocale
-      const startVoiceRecognition = () => {
+      // Écoute permanente
+      useEffect(() => {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SpeechRecognition) {
-          alert("Reconnaissance vocale non supportée.");
-          return;
-        }
+        if (!SpeechRecognition) return;
 
-        const recognition = new SpeechRecognition();
-        recognition.lang = 'fr-FR';
+        const rec = new SpeechRecognition();
+        rec.lang = 'fr-FR';
+        rec.continuous = true;
+        rec.interimResults = false;
 
-        recognition.onstart = () => setIsListening(true);
-        recognition.onend = () => setIsListening(false);
-        recognition.onerror = () => setIsListening(false);
-
-        recognition.onresult = (event) => {
-          const transcript = event.results[0][0].transcript;
-          setInput(transcript);
-          sendMessage(transcript);
+        rec.onstart = () => setIsListening(true);
+        rec.onend = () => {
+          setIsListening(false);
+          if (!isSpeakingRef.current) {
+            try { rec.start(); } catch(e) {}
+          }
         };
 
-        recognition.start();
-      };
+        rec.onresult = (event) => {
+          const transcript = event.results[event.results.length - 1][0].transcript.trim();
+          if (transcript) {
+            setInput(transcript);
+            sendMessage(transcript);
+          }
+        };
 
-      // Envoi du message
+        recognitionRef.current = rec;
+        try { rec.start(); } catch(e) {}
+
+        return () => {
+          if (recognitionRef.current) recognitionRef.current.stop();
+        };
+      }, []);
+
       const sendMessage = async (textToSend) => {
         const query = textToSend || input;
         if (!query.trim()) return;
 
         setInput('');
         setLastResponse("Analyse en cours...");
+
+        if (recognitionRef.current) recognitionRef.current.stop();
 
         try {
           const response = await fetch('/chat', {
@@ -152,18 +188,24 @@
 
           if (response.ok) {
             const data = await response.json();
-            const reply = data.response || data.message || "Commande exécutée.";
+            const reply = data.response || data.message || "Opération terminée.";
             setLastResponse(reply);
-            speak(reply);
+            speak(reply, () => {
+              try { recognitionRef.current.start(); } catch(e) {}
+            });
           } else {
-            const errReply = "Compris, monsieur.";
-            setLastResponse(errReply);
-            speak(errReply);
+            const errText = "Erreur de communication avec le serveur backend.";
+            setLastResponse(errText);
+            speak(errText, () => {
+              try { recognitionRef.current.start(); } catch(e) {}
+            });
           }
         } catch (err) {
-          const localReply = "Système opérationnel.";
-          setLastResponse(localReply);
-          speak(localReply);
+          const offlineText = "Impossible de contacter le serveur.";
+          setLastResponse(offlineText);
+          speak(offlineText, () => {
+            try { recognitionRef.current.start(); } catch(e) {}
+          });
         }
       };
 
@@ -171,25 +213,22 @@
         <div className="relative w-full h-screen text-cyan-400 flex flex-col justify-between p-6 z-10 select-none">
           <GalaxyCanvas />
           
-          {/* Header */}
           <header className="z-10 text-center mt-2">
             <h1 className="text-3xl font-bold tracking-[0.3em] text-cyan-300 drop-shadow-[0_0_12px_rgba(0,240,255,0.9)]">
               J.A.R.V.I.S.
             </h1>
             <p className="text-[11px] text-cyan-500 uppercase tracking-widest mt-1">
-              {isListening ? "• ÉCOUTE ACTIVE •" : isSpeaking ? "• RÉPONSE EN COURS •" : "• EN LIGNE •"}
+              {isSpeaking ? "• RÉPONSE EN COURS •" : isListening ? "• ÉCOUTE CONTINU •" : "• INITIALISATION •"}
             </p>
           </header>
 
-          {/* Noyau Central + Affichage Textuel de la Réponse */}
           <main className="z-10 flex-1 flex flex-col items-center justify-center px-4">
-            {/* Cœur lumineux dynamique */}
             <div className={`w-36 h-36 rounded-full border-2 border-cyan-500/40 flex items-center justify-center transition-all duration-500 ${
               isSpeaking 
                 ? 'scale-110 shadow-[0_0_50px_rgba(0,240,255,0.8)] border-cyan-300' 
                 : isListening 
-                ? 'scale-105 shadow-[0_0_40px_rgba(255,0,80,0.6)] border-red-500/60 animate-pulse' 
-                : 'shadow-[0_0_25px_rgba(0,240,255,0.3)] animate-pulse'
+                ? 'scale-105 shadow-[0_0_35px_rgba(0,240,255,0.5)] border-cyan-400 animate-pulse' 
+                : 'shadow-[0_0_25px_rgba(0,240,255,0.3)]'
             }`}>
               <div className="w-24 h-24 rounded-full border border-cyan-300/80 flex items-center justify-center">
                 <div className={`w-12 h-12 rounded-full bg-cyan-400 shadow-[0_0_25px_#00f0ff] transition-all ${
@@ -198,7 +237,6 @@
               </div>
             </div>
 
-            {/* Affichage de la réponse au centre (Style Sous-Titre Futuriste) */}
             <div className="mt-8 max-w-md text-center">
               <p className="text-base font-medium tracking-wide text-cyan-200 drop-shadow-[0_0_8px_rgba(0,240,255,0.6)] leading-relaxed">
                 {lastResponse}
@@ -206,25 +244,19 @@
             </div>
           </main>
 
-          {/* Barre de Commande Futuriste */}
           <footer className="z-10 w-full max-w-md mx-auto bg-black/40 backdrop-blur-lg border border-cyan-500/30 rounded-full p-2 flex items-center gap-2 shadow-[0_0_20px_rgba(0,240,255,0.15)]">
-            <button
-              onClick={startVoiceRecognition}
-              className={`p-3 rounded-full border transition-all ${
-                isListening
-                  ? 'bg-red-500/30 border-red-400 text-red-300 shadow-[0_0_15px_rgba(255,0,0,0.5)]'
-                  : 'bg-cyan-500/20 hover:bg-cyan-500/40 border-cyan-400/50 text-cyan-300'
-              }`}
-            >
+            <div className={`p-3 rounded-full border transition-all ${
+              isListening ? 'bg-cyan-500/30 border-cyan-400 text-cyan-200 animate-pulse' : 'bg-cyan-950/40 border-cyan-700 text-cyan-600'
+            }`}>
               🎤
-            </button>
+            </div>
 
             <input
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
-              placeholder="Commande système..."
+              placeholder="Parlez directement ou tapez..."
               className="w-full bg-transparent text-cyan-100 placeholder-cyan-600 outline-none px-3 text-sm"
             />
 
