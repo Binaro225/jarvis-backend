@@ -15,8 +15,8 @@ from typing import Optional, Dict, Any, List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel, model_validator
 
 import tools
 import persona
@@ -111,7 +111,16 @@ class HistoryMessage(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    prompt: str
+    """
+    Modele flexible : accepte soit {"prompt": "..."} (format natif/complet, avec provider,
+    history, tools, etc.), soit {"message": "..."} (format simplifie envoye par certains
+    frontends). Les deux sont acceptes pour eviter les 422 quand le frontend n'utilise pas
+    exactement le meme nom de champ.
+    """
+
+    prompt: Optional[str] = None
+    message: Optional[str] = None  # alias tolere, mappe automatiquement vers 'prompt'
+
     provider: Optional[str] = None   # override ponctuel, sans changer l'etat global
     model: Optional[str] = None      # override ponctuel du modele
     system: Optional[str] = None     # instructions ponctuelles additionnelles
@@ -120,6 +129,15 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = 0.7
     max_tokens: Optional[int] = 1024
     use_tools: Optional[bool] = True
+
+    @model_validator(mode="after")
+    def _resolve_prompt(self):
+        # Si le frontend a envoye "message" au lieu de "prompt", on bascule dessus.
+        if not self.prompt and self.message:
+            self.prompt = self.message
+        if not self.prompt or not self.prompt.strip():
+            raise ValueError("Le champ 'prompt' (ou 'message') est requis et ne peut pas etre vide.")
+        return self
 
 
 class ToolCallLog(BaseModel):
@@ -537,16 +555,6 @@ def current_datetime_str() -> str:
 # Endpoints
 # ----------------------------------------------------------------------------
 
-@app.get("/")
-async def root():
-    """Sert directement le HUD JARVIS : l'URL racine du deploiement Render affiche
-    immediatement le frontend, sans etape intermediaire."""
-    index_path = BASE_DIR / "index.html"
-    if index_path.exists():
-        return FileResponse(index_path)
-    return {"message": "JARVIS Backend actif", "current_brain": current_brain}
-
-
 @app.get("/health")
 async def health():
     """Endpoint de sante utilise par Render pour verifier que le service tourne."""
@@ -703,6 +711,8 @@ async def chat(req: ChatRequest):
     courante et du cerveau actif. L'historique de conversation transmis par le frontend est
     reinjecte pour que JARVIS ne perde jamais le fil.
 
+    Accepte indifferemment {"prompt": "..."} ou {"message": "..."} en entree (voir ChatRequest).
+
     Si une image (capture d'ecran) est jointe (image_base64), la requete est automatiquement
     routee vers le meilleur modele vision disponible, avec bascule (fallback) sur le modele
     vision suivant en cas d'echec du premier - liste decouverte dynamiquement, aucun modele fige.
@@ -711,12 +721,14 @@ async def chat(req: ChatRequest):
       - "Rappelle-toi que...", "Note que...", "Souviens-toi que..." -> memorisation immediate.
       - "Passe sur Groq", "Quel cerveau utilises-tu ?" -> changement/etat du cerveau immediat.
 
+    Pour toute autre demande (ex: "combien de mails Gmail aujourd'hui ?"), le prompt est envoye
+    au LLM actif AVEC les definitions d'outils (tools.get_*_tools()) : c'est le LLM qui decide
+    d'appeler reellement l'outil (ex: get_unread_emails), et la reponse finale integre le
+    resultat reel de l'outil, pas une reponse statique.
+
     Toute la logique d'appel LLM est protegee par un try/except global : le frontend ne
     recoit jamais une erreur HTTP 500/404 brute, mais toujours une reponse JSON exploitable.
     """
-    if not req.prompt or not req.prompt.strip():
-        raise HTTPException(status_code=400, detail="Le champ 'prompt' ne peut pas etre vide.")
-
     provider = (req.provider or current_brain["provider"]).lower().strip()
     if provider not in PROVIDERS:
         raise HTTPException(status_code=400, detail=f"Fournisseur inconnu: {provider}")
@@ -777,7 +789,10 @@ async def chat(req: ChatRequest):
             )
 
     # ------------------------------------------------------------------------
-    # Appel LLM normal (ou vision avec fallback automatique), protege globalement
+    # Appel LLM normal (ou vision avec fallback automatique), avec function calling reel.
+    # C'est ICI que Gmail / Drive / Sheets / recherche web sont effectivement executes,
+    # via dispatch_to_provider -> run_gemini_chat / run_openai_style_chat -> tools.execute_tool.
+    # Le tout est protege globalement pour ne jamais renvoyer une erreur brute au frontend.
     # ------------------------------------------------------------------------
     effective_system = persona.build_effective_system_prompt(
         current_datetime=current_datetime_str(),
@@ -835,36 +850,43 @@ async def chat(req: ChatRequest):
     )
 
 
+# ----------------------------------------------------------------------------
+# Fichiers statiques / frontend (route catch-all, doit rester en DERNIER pour ne
+# jamais intercepter les routes API definies au-dessus).
+# ----------------------------------------------------------------------------
+
+@app.get("/")
+async def root():
+    """Sert directement le HUD JARVIS : l'URL racine du deploiement Render affiche
+    immediatement le frontend, sans etape intermediaire."""
+    index_path = BASE_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(index_path)
+    return {"message": "JARVIS Backend actif", "current_brain": current_brain}
+
+
+@app.get("/{file_name:path}")
+async def serve_static_files(file_name: str):
+    """Sert les fichiers statiques du frontend (JS/CSS/assets). Retourne 404 si le
+    fichier n'existe pas, sans jamais intercepter les routes API (elles sont enregistrees
+    avant celle-ci et sont donc prioritaires)."""
+    if not file_name:
+        index_path = BASE_DIR / "index.html"
+        if index_path.exists():
+            return FileResponse(index_path)
+        return Response(status_code=404)
+
+    full_path = BASE_DIR / file_name
+    if full_path.exists() and full_path.is_file():
+        if file_name.endswith((".jsx", ".js")):
+            return FileResponse(full_path, media_type="text/javascript")
+        return FileResponse(full_path)
+
+    return Response(status_code=404)
+
+
 if __name__ == "__main__":
     import uvicorn
 
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
-# --- CODE À AJOUTER À LA FIN DE MAIN.PY ---
-from fastapi.responses import FileResponse, Response
-import os
-
-@app.get("/{file_name:path}")
-async def serve_static_files(file_name: str):
-    if file_name == "" or file_name == "/":
-        return FileResponse("index.html")
-# --- CODE À AJOUTER À LA FIN DE MAIN.PY POUR LA ROUTE /CHAT ---
-from pydantic import BaseModel
-
-class ChatRequest(BaseModel):
-    message: str
-
-@app.post("/chat")
-async def chat_endpoint(req: ChatRequest):
-    user_text = req.message
-    
-    # Remplacer cette ligne par l'appel à ton agent IA si nécessaire
-    reply = f"J'ai bien reçu votre commande : '{user_text}'. Analyse en cours."
-    
-    return {"response": reply}    
-    if os.path.exists(file_name):
-        if file_name.endswith((".jsx", ".js")):
-            return FileResponse(file_name, media_type="text/javascript")
-        return FileResponse(file_name)
-    
-    return Response(status_code=404)
