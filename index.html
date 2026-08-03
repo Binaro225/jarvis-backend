@@ -65,7 +65,7 @@
         }
 
         .chat-box {
-            width: 90%;
+            width: 90vw;
             max-width: 500px;
             background: rgba(8, 20, 35, 0.85);
             border: 1px solid rgba(0, 240, 255, 0.3);
@@ -75,7 +75,7 @@
             box-shadow: 0 0 20px rgba(0, 240, 255, 0.15);
             backdrop-filter: blur(10px);
             pointer-events: auto;
-            max-height: 40vh;
+            max-height: 35vh;
             overflow-y: auto;
         }
 
@@ -87,7 +87,7 @@
         }
 
         .input-bar {
-            width: 90%;
+            width: 90vw;
             max-width: 500px;
             display: flex;
             align-items: center;
@@ -130,18 +130,31 @@
         }
 
         .btn-mic {
-            width: 40px;
-            height: 40px;
+            width: 42px;
+            height: 42px;
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
             margin-right: 8px;
             padding: 0;
+            font-size: 1.1rem;
+        }
+
+        .btn-mic.recording {
+            background: rgba(255, 50, 50, 0.4);
+            border-color: #ff3232;
+            box-shadow: 0 0 15px rgba(255, 50, 50, 0.8);
+            animation: pulse 1s infinite alternate;
+        }
+
+        @keyframes pulse {
+            from { transform: scale(1); }
+            to { transform: scale(1.1); }
         }
     </style>
 
-    <!-- Inclusion de Three.js pour la scène 3D -->
+    <!-- Three.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
 <body>
@@ -162,7 +175,7 @@
             </div>
 
             <div class="input-bar">
-                <button class="btn btn-mic" id="mic-btn">🎙️</button>
+                <button class="btn btn-mic" id="mic-btn" title="Activer le micro">🎙️</button>
                 <input type="text" id="user-input" placeholder="Envoyer un message..." />
                 <button class="btn" id="send-btn">OK</button>
             </div>
@@ -170,7 +183,7 @@
     </div>
 
     <script>
-        // --- 1. CONFIGURATION DE LA SCÈNE THREE.JS ---
+        // --- 1. SCÈNE 3D (THREE.JS) ---
         const container = document.getElementById('canvas-container');
         const scene = new THREE.Scene();
         scene.fog = new THREE.FogExp2(0x050b14, 0.015);
@@ -191,7 +204,7 @@
         pointLight.position.set(0, 0, 0);
         scene.add(pointLight);
 
-        // Orbe Central J.A.R.V.I.S.
+        // Noyau J.A.R.V.I.S.
         const coreGeometry = new THREE.SphereGeometry(2, 32, 32);
         const coreMaterial = new THREE.MeshBasicMaterial({ color: 0x00f0ff, wireframe: true });
         const core = new THREE.Mesh(coreGeometry, coreMaterial);
@@ -202,13 +215,13 @@
         const innerCore = new THREE.Mesh(innerCoreGeom, innerCoreMat);
         scene.add(innerCore);
 
-        // Groupe pour contenir tous les nœuds de la galaxie
+        // Groupe pour les nœuds (Planètes / Étoiles)
         const galaxyGroup = new THREE.Group();
         scene.add(galaxyGroup);
 
         const nodesMap = new Map();
 
-        // --- 2. CRÉATION DES PLANÈTES (SHEETS) ET ÉTOILES (FILES) ---
+        // --- 2. CRÉATION DES PLANÈTES ET ÉTOILES ---
         function createGalaxyNode(nodeData, index, total) {
             const angle = (index / total) * Math.PI * 2;
             const radius = 8 + Math.random() * 12;
@@ -216,8 +229,8 @@
 
             let mesh;
 
-            if (nodeData.type === 'spreadsheet') {
-                // PLANÈTE (Google Sheets) -> Sphère verte émeraude
+            if (nodeData.type === 'spreadsheet' || (nodeData.mimeType && nodeData.mimeType.includes('spreadsheet'))) {
+                // PLANÈTE (Google Sheets) -> Sphère vert émeraude avec anneau
                 const geometry = new THREE.SphereGeometry(0.7, 16, 16);
                 const material = new THREE.MeshStandardMaterial({
                     color: 0x00ff88,
@@ -227,14 +240,13 @@
                 });
                 mesh = new THREE.Mesh(geometry, material);
                 
-                // Anneau orbital autour des planètes Sheets
                 const ringGeom = new THREE.RingGeometry(0.9, 1.1, 16);
                 const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ff88, side: THREE.DoubleSide, opacity: 0.5, transparent: true });
                 const ring = new THREE.Mesh(ringGeom, ringMat);
                 ring.rotation.x = Math.PI / 2;
                 mesh.add(ring);
             } else {
-                // ÉTOILE (Document/Autre) -> Octaèdre/Tétraèdre bleu cyan
+                // ÉTOILE (Document / Autre) -> Octaèdre bleu cyan
                 const geometry = new THREE.OctahedronGeometry(0.35);
                 const material = new THREE.MeshBasicMaterial({ color: 0x00f0ff });
                 mesh = new THREE.Mesh(geometry, material);
@@ -261,47 +273,52 @@
 
         // --- 3. CHARGEMENT DE LA GALAXIE DEPUIS LE BACKEND ---
         async function loadGalaxy() {
+            const responseText = document.getElementById('response-text');
             try {
                 const res = await fetch('/api/galaxy');
-                if (!res.ok) throw new Error("Erreur réseau");
+                if (!res.ok) throw new Error("Erreur HTTP " + res.status);
+                
                 const data = await res.json();
+                const nodes = (data && Array.isArray(data.nodes)) ? data.nodes : [];
 
-                // Nettoyage de l'ancienne galaxie
                 while(galaxyGroup.children.length > 0){ 
                     galaxyGroup.remove(galaxyGroup.children[0]); 
                 }
                 nodesMap.clear();
 
-                const nodes = data.nodes || [];
-                nodes.forEach((node, idx) => {
-                    createGalaxyNode(node, idx, nodes.length);
-                });
+                if (nodes.length > 0) {
+                    nodes.forEach((node, idx) => createGalaxyNode(node, idx, nodes.length));
+                    responseText.innerText = "Galaxie connectée. Je suis à votre écoute.";
+                } else {
+                    throw new Error("Aucun nœud reçu");
+                }
             } catch (err) {
-                console.warn("Impossible de charger /api/galaxy, utilisation du mode fallback :", err);
-                // Demo fallback
+                console.warn("Passage en mode démo galaxie :", err);
+                while(galaxyGroup.children.length > 0){ 
+                    galaxyGroup.remove(galaxyGroup.children[0]); 
+                }
+                nodesMap.clear();
+
                 const fallbackNodes = [
-                    { id: "1", name: "DKB ERP", type: "spreadsheet" },
-                    { id: "2", name: "Suivi Revenus 2026", type: "spreadsheet" },
-                    { id: "3", name: "Document Note", type: "file" }
+                    { id: "s1", name: "DKB ERP", type: "spreadsheet" },
+                    { id: "s2", name: "Suivi Revenus 2026", type: "spreadsheet" },
+                    { id: "d1", name: "Note", type: "file" }
                 ];
                 fallbackNodes.forEach((node, idx) => createGalaxyNode(node, idx, fallbackNodes.length));
+                responseText.innerText = "Système J.A.R.V.I.S. initialisé. Comment puis-je vous aider ?";
             }
         }
 
         loadGalaxy();
 
-        // --- 4. ANIMATION DE LA SCÈNE 3D ---
+        // --- 4. ANIMATION 3D ---
         function animate() {
             requestAnimationFrame(animate);
 
-            // Rotation douce de l'orbe central
             core.rotation.y += 0.005;
             core.rotation.x += 0.002;
-
-            // Rotation lente de toute la galaxie
             galaxyGroup.rotation.y += 0.0015;
 
-            // Effet d'oscillation verticale pour chaque nœud
             const time = Date.now() * 0.001;
             galaxyGroup.children.forEach(child => {
                 if (child.userData.baseY !== undefined) {
@@ -313,9 +330,76 @@
         }
         animate();
 
-        // --- 5. GESTION DU CHAT ET REQUÊTES ---
-        const sendBtn = document.getElementById('send-btn');
+        // --- 5. SYNTHÈSE VOCALE (TEXT-TO-SPEECH) ---
+        function speakText(text) {
+            if (!('speechSynthesis' in window)) return;
+
+            window.speechSynthesis.cancel(); // Stoppe toute lecture en cours
+
+            // Nettoyage rapide du texte (enlever le markdown)
+            const cleanText = text.replace(/[*_#`]/g, '');
+            const utterance = new SpeechSynthesisUtterance(cleanText);
+            utterance.lang = 'fr-FR';
+            utterance.rate = 1.0;
+            utterance.pitch = 1.0;
+
+            window.speechSynthesis.speak(utterance);
+        }
+
+        // --- 6. RECONNAISSANCE VOCALE (SPEECH-TO-TEXT) ---
+        const micBtn = document.getElementById('mic-btn');
         const userInput = document.getElementById('user-input');
+        let recognition = null;
+        let isListening = false;
+
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+        if (SpeechRecognition) {
+            recognition = new SpeechRecognition();
+            recognition.lang = 'fr-FR';
+            recognition.continuous = false;
+            recognition.interimResults = false;
+
+            recognition.onstart = () => {
+                isListening = true;
+                micBtn.classList.add('recording');
+            };
+
+            recognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript;
+                userInput.value = transcript;
+                sendMessage();
+            };
+
+            recognition.onerror = (event) => {
+                console.error("Erreur micro:", event.error);
+                stopListening();
+            };
+
+            recognition.onend = () => {
+                stopListening();
+            };
+        } else {
+            micBtn.style.display = 'none'; // Masquer si non supporté
+        }
+
+        function stopListening() {
+            isListening = false;
+            micBtn.classList.remove('recording');
+        }
+
+        micBtn.addEventListener('click', () => {
+            if (!recognition) return;
+            if (isListening) {
+                recognition.stop();
+            } else {
+                window.speechSynthesis.cancel(); // Coupe l'IA si elle parlait
+                recognition.start();
+            }
+        });
+
+        // --- 7. ENVOI DU MESSAGE & ENPOINT /CHAT ---
+        const sendBtn = document.getElementById('send-btn');
         const responseText = document.getElementById('response-text');
         const statusText = document.getElementById('status-text');
 
@@ -335,22 +419,27 @@
                 });
 
                 const data = await res.json();
-                responseText.innerText = data.response || "Aucune réponse reçue.";
+                const reply = data.response || "Aucune réponse reçue.";
+                
+                responseText.innerText = reply;
                 statusText.innerText = "• PRÊT •";
 
-                // Si JARVIS a manipulé un fichier spécifique, faire pulser sa planète 3D
+                // Synthèse vocale automatique de la réponse
+                speakText(reply);
+
+                // Animation de focus sur le nœud concerné
                 if (data.source_node_ids && data.source_node_ids.length > 0) {
                     data.source_node_ids.forEach(id => {
                         const targetMesh = nodesMap.get(id);
                         if (targetMesh) {
-                            targetMesh.scale.set(2, 2, 2);
-                            setTimeout(() => targetMesh.scale.set(1, 1, 1), 2000);
+                            targetMesh.scale.set(2.5, 2.5, 2.5);
+                            setTimeout(() => targetMesh.scale.set(1, 1, 1), 2500);
                         }
                     });
                 }
 
             } catch (err) {
-                responseText.innerText = "Erreur de communication avec JARVIS.";
+                responseText.innerText = "Erreur de connexion au serveur.";
                 statusText.innerText = "• ERREUR •";
             }
         }
@@ -360,7 +449,6 @@
             if (e.key === 'Enter') sendMessage();
         });
 
-        // Redimensionnement automatique de la fenêtre
         window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
