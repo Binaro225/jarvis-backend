@@ -3,18 +3,11 @@
  * --------------------
  * Coquille mobile-first de JARVIS : plein ecran, la Galaxie 3D en fond, aucune carte de log
  * ni texte d'outil intermediaire. Seule une petite carte flottante affiche la reponse finale.
- *
- * INSTALLATION
- *   npm install three @react-three/fiber @react-three/drei
- *
- * USAGE
- *   import JarvisInterface from './JarvisInterface';
- *   export default function App() { return <JarvisInterface />; }
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Canvas } from '@react-three/fiber';
-import GalaxyScene from './GalaxyScene';
+import GalaxyScene from './galaxyscene.jsx';
 
 const LS_BACKEND = 'jarvis_backend_url';
 const LS_PROVIDER = 'jarvis_provider';
